@@ -1,0 +1,42 @@
+[Unit]
+Description=Algo Trading v2
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=algo
+Group=algo
+WorkingDirectory=/opt/algo-trading_v2
+
+# External config overrides bundled application.properties
+# Put production credentials in /opt/algo-trading_v2/application.properties
+ExecStart=/opt/java/bin/java \
+    -Xms256m -Xmx512m \
+    -XX:+UseZGC \
+    -XX:+ZGenerational \
+    -Dfile.encoding=UTF-8 \
+    -Duser.timezone=Asia/Kolkata \
+    -jar /opt/algo-trading_v2/algo-trading-v2-2.0.0.jar
+
+Restart=on-failure
+RestartSec=30
+
+# Prevent restart storms — max 3 restarts in 5 min
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+# Safety: if it crashes 3x, don't restart — alert via Telegram will fire from code
+# Remove StartLimitAction if you want systemd email instead
+StartLimitAction=none
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=algo-trading_v2
+
+# Prevent sensitive env from leaking
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,45 @@
+# ═══════════════════════════════════════════════════════
+#  PRODUCTION CONFIG — /opt/algo-trading/application.properties
+#  This file overrides the bundled classpath defaults.
+#  Keep this file on the VPS only — never commit to git.
+# ═══════════════════════════════════════════════════════
+
+# ─── Angel One / SmartAPI credentials ───────────────────
+broker.client.id=YOUR_CLIENT_ID
+broker.pin=YOUR_PIN
+broker.totp.secret=YOUR_TOTP_SECRET
+broker.api.key=YOUR_API_KEY
+
+# ─── Trading mode ────────────────────────────────────────
+trading.mode=live
+
+# ─── Risk ─────────────────────────────────────────────────
+risk.capital=1200000
+risk.per.trade=0.01
+risk.max.daily.loss=0.02
+risk.max.daily.profit=0.10
+risk.max.trades.day=10
+risk.max.open.positions=5
+
+# ─── Instrument ───────────────────────────────────────────
+# EQUITY | FUTURES | OPTION_BUY | OPTION_WRITE
+trading.instrument.type=OPTION_BUY
+trading.option.lots=2
+trading.option.buy.max.profit=6000
+trading.option.buy.max.loss=3000
+trading.option.write.max.profit=6000
+trading.option.write.max.loss=3000
+
+# ─── Database ─────────────────────────────────────────────
+db.url=jdbc:postgresql://localhost:5432/algo_db_v2
+db.username=algo
+db.password=CHANGE_ME_DB_PASSWORD
+
+# ─── Telegram ─────────────────────────────────────────────
+telegram.bot.token=YOUR_BOT_TOKEN
+telegram.chat.id=YOUR_CHAT_ID
+telegram.enabled=true
+
+# ─── Health check ─────────────────────────────────────────
+health.port=8080
+health.enabled=true

@@ -1,0 +1,24 @@
+# Build output
+target/
+
+# Compiled classes outside target/
+**/*.class
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Claude Code
+.claude/
+
+# Credentials — never commit
+src/main/resources/application.properties
+application.properties
+config/application.properties
+
+# Logs
+logs/
+
+# DB backups
+deploy/backups/

@@ -1,0 +1,10 @@
+# Market-hours cron for the 'algo' system user
+# Install with: crontab -e -u algo
+# All times in IST — assumes VPS timezone is Asia/Kolkata (verify with: timedatectl)
+#
+# Start trading at 09:00 IST (5 min before market open for auth + feed warm-up)
+0 9 * * 1-5  /bin/systemctl start algo-trading_v2
+
+# Stop (square-off) at 15:45 IST — app does its own 15:15 square-off internally,
+# this kill is a safety net in case the JVM hangs.
+45 15 * * 1-5  /bin/systemctl stop algo-trading_v2
