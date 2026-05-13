@@ -1,13 +1,25 @@
 # Build output
 target/
 
-# Compiled classes outside target/
+# Compiled classes
+*.class
 **/*.class
+
+# Package files
+*.jar
+*.war
+*.nar
+*.ear
+*.zip
+*.tar.gz
+*.rar
 
 # IDE
 .idea/
 *.iml
 .vscode/
+*.ctxt
+.mtj.tmp/
 
 # Claude Code
 .claude/
@@ -19,6 +31,11 @@ config/application.properties
 
 # Logs
 logs/
+*.log
 
 # DB backups
 deploy/backups/
+
+# JVM crash logs
+hs_err_pid*
+replay_pid*
