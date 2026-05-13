@@ -173,13 +173,29 @@ public class TradingEngine {
         String chatId   = AppConfig.get("telegram.chat.id",   "");
         if (!botToken.isEmpty() && !chatId.isEmpty()) {
             telegramListener = new TelegramCommandListener(
-                    botToken, chatId, riskManager, orderManager, this::closeAllPositions);
+                    botToken, chatId, riskManager, orderManager, this::closeAllPositions,
+                    strategyMap.keySet().stream().sorted().toList());
             telegramListener.start();
         }
 
         Runtime.getRuntime().addShutdownHook(Thread.ofVirtual().unstarted(this::shutdown));
-        TelegramAlert.sendAsync("TradingEngine started | mode=" + (paperMode ? "PAPER" : "LIVE")
-                + " | instruments=" + watchlist.size());
+
+        // ── Startup banner ────────────────────────────────────────────
+        List<String> strategyNames = strategyMap.keySet().stream().sorted().toList();
+        log.info("════════════════════════════════════════════════");
+        log.info("  Mode       : {}", paperMode ? "PAPER" : "LIVE");
+        log.info("  Instrument : {}", AppConfig.get("trading.instrument.type", "EQUITY"));
+        log.info("  Watchlist  : {} symbols", watchlist.size());
+        log.info("  Strategies : {}", strategyNames.size());
+        strategyNames.forEach(n -> log.info("    → {}", n));
+        log.info("════════════════════════════════════════════════");
+
+        TelegramAlert.sendAsync(
+            "✅ TradingEngine started\n" +
+            "Mode: " + (paperMode ? "PAPER" : "LIVE") + "\n" +
+            "Instrument: " + AppConfig.get("trading.instrument.type", "EQUITY") + "\n" +
+            "Watchlist: " + watchlist.size() + " symbols\n" +
+            "Strategies: " + String.join(", ", strategyNames));
         log.info("TradingEngine running.");
 
         if (paperMode) runPaperLoop();
@@ -354,11 +370,14 @@ public class TradingEngine {
 
         boolean opened = orderManager.buy(optSymbol, resolution.token(), "NFO", posKey, qty, price);
         if (opened) {
-            double maxProfit = AppConfig.getDouble("trading.option.buy.max.profit", 6000);
-            double maxLoss   = AppConfig.getDouble("trading.option.buy.max.loss",   3000);
-            double tp = MarketUtils.roundToTick(price + maxProfit / qty,
+            double slPct   = AppConfig.getDouble("trading.option.buy.sl.pct", 0);
+            double tpPct   = AppConfig.getDouble("trading.option.buy.tp.pct", 0);
+            double maxLoss = AppConfig.getDouble("trading.option.buy.max.loss", 3000);
+            double slDist  = (slPct > 0) ? price * slPct : maxLoss / qty;
+            double tpDist  = (tpPct > 0) ? price * tpPct : maxLoss * 2 / qty;
+            double sl = MarketUtils.roundToTick(Math.max(0.05, price - slDist),
                     com.trading.strategy.InstrumentType.OPTION_BUY);
-            double sl = MarketUtils.roundToTick(Math.max(0.05, price - maxLoss / qty),
+            double tp = MarketUtils.roundToTick(price + tpDist,
                     com.trading.strategy.InstrumentType.OPTION_BUY);
             takeProfits.put(posKey, tp);
             stopLosses.put(posKey, sl);
@@ -368,9 +387,10 @@ public class TradingEngine {
             subscribeOptionToken(resolution.token());
             saveOpenTrade(posKey, optSymbol, resolution.token(), "NFO",
                     stratName, "BUY", qty, price, sl, tp);
-            log.info("Option BUY | {} token={} qty={} @ Rs.{} | tp=Rs.{} (max+{}) sl=Rs.{} (max-{})",
-                    optSymbol, resolution.token(), qty, price,
-                    tp, (int) maxProfit, sl, (int) maxLoss);
+            log.info("Option BUY | {} token={} qty={} @ Rs.{} | tp=Rs.{} sl=Rs.{} [{}]",
+                    optSymbol, resolution.token(), qty, price, tp, sl,
+                    slPct > 0 ? String.format("pct sl=%.0f%% tp=%.0f%%", slPct * 100, tpPct * 100)
+                              : String.format("fixed sl=-Rs.%.0f tp=+Rs.%.0f", maxLoss, maxLoss * 2));
         }
     }
 
@@ -737,15 +757,20 @@ public class TradingEngine {
         }
 
         List<Strategy> list = new ArrayList<>();
+
         var mics = new MultiIndicatorConfluenceStrategy(
                 com.trading.strategy.mics.MicsConfig.fromAppConfig(), micsInstr);
+
         list.add(mics);
+
         // MA Crossover and VSRSI use the same instrument type so all strategies trade consistently
+        /*
         list.add(new MACrossoverStrategy(
                 AppConfig.getInt("strategy.ma.fast", 10),
                 AppConfig.getInt("strategy.ma.slow", 30),
                 AppConfig.get(   "strategy.ma.type", "EMA"),
                 micsInstr));
+
         list.add(new VwapSupertrendRsiStrategy(
                 AppConfig.getInt(   "strategy.vsrsi.atr.period",      10),
                 AppConfig.getDouble("strategy.vsrsi.atr.multiplier",  3.0),
@@ -757,7 +782,7 @@ public class TradingEngine {
                 java.time.LocalTime.parse(AppConfig.get("strategy.vsrsi.entry.start",  "09:30")),
                 java.time.LocalTime.parse(AppConfig.get("strategy.vsrsi.entry.cutoff", "14:30")),
                 micsInstr));
-
+        */
         list.forEach(s -> strategyMap.put(s.getName(), s));
         return list;
     }

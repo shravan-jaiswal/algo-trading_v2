@@ -1,3 +1,6 @@
+# Master script
+https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json
+
 From the D:\DEV\shravan_github\algo-trading_v2 directory, run:
 
 # Compile only (no JAR)

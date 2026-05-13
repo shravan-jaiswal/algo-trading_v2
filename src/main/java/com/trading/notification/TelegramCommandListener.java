@@ -10,6 +10,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -28,6 +29,7 @@ public class TelegramCommandListener {
     private final RiskManager  riskManager;
     private final OrderManager orderManager;
     private final Runnable     closeAllCallback;
+    private final List<String> strategyNames;
     private final OkHttpClient http = new OkHttpClient();
 
     private long lastUpdateId = 0;
@@ -38,12 +40,14 @@ public class TelegramCommandListener {
     public TelegramCommandListener(String botToken, String chatId,
                                    RiskManager riskManager,
                                    OrderManager orderManager,
-                                   Runnable closeAllCallback) {
-        this.botToken        = botToken;
-        this.chatId          = chatId;
-        this.riskManager     = riskManager;
-        this.orderManager    = orderManager;
+                                   Runnable closeAllCallback,
+                                   List<String> strategyNames) {
+        this.botToken         = botToken;
+        this.chatId           = chatId;
+        this.riskManager      = riskManager;
+        this.orderManager     = orderManager;
         this.closeAllCallback = closeAllCallback;
+        this.strategyNames    = strategyNames;
     }
 
     public void start() {
@@ -99,6 +103,7 @@ public class TelegramCommandListener {
                 }
                 yield "closeall not available.";
             }
+            case "/strategy"  -> buildStrategy();
             case "/help"      -> buildHelp();
             default           -> null;
         };
@@ -151,14 +156,22 @@ public class TelegramCommandListener {
         return sb.toString().trim();
     }
 
+    private String buildStrategy() {
+        StringBuilder sb = new StringBuilder("📐 Active Strategies\n");
+        sb.append("Instrument: ").append(com.trading.config.AppConfig.get("trading.instrument.type", "EQUITY")).append("\n");
+        strategyNames.forEach(n -> sb.append("• ").append(n).append("\n"));
+        return sb.toString().trim();
+    }
+
     private String buildHelp() {
         return "🤖 Commands\n" +
-               "/status   — system status\n" +
-               "/pnl      — today's P&L\n" +
+               "/status    — system status\n" +
+               "/pnl       — today's P&L\n" +
                "/positions — open positions\n" +
-               "/halt     — stop new trades\n" +
-               "/resume   — resume trading\n" +
-               "/closeall — close all positions\n" +
-               "/help     — this message";
+               "/strategy  — active strategies\n" +
+               "/halt      — stop new trades\n" +
+               "/resume    — resume trading\n" +
+               "/closeall  — close all positions\n" +
+               "/help      — this message";
     }
 }
