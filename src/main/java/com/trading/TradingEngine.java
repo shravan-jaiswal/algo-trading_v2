@@ -585,6 +585,7 @@ public class TradingEngine {
                                String strategyName, String side, int qty,
                                double entryPrice, double sl, double tp) {
         ExecutedTrade t = new ExecutedTrade();
+        t.setPosKey(posKey);
         t.setToken(token);
         t.setSymbol(symbol);
         t.setStrategyName(strategyName);
@@ -654,7 +655,9 @@ public class TradingEngine {
     private void restoreOpenTrades() {
         List<ExecutedTrade> open = tradeRepo.findOpen();
         for (ExecutedTrade t : open) {
-            String posKey = t.getToken() + "|" + t.getStrategyName();
+            String posKey = (t.getPosKey() != null && !t.getPosKey().isBlank())
+                    ? t.getPosKey()
+                    : t.getToken() + "|" + t.getStrategyName(); // legacy fallback for old DB rows
             orderManager.restorePosition(posKey, t.getEntryPrice(), t.getQuantity(), t.getSide(), t.getSymbol());
             riskManager.restoreOpenTrade(posKey, t.getEntryPrice(), t.getQuantity());
 

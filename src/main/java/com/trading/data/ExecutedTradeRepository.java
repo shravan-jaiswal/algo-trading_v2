@@ -22,23 +22,24 @@ public class ExecutedTradeRepository {
     public void save(ExecutedTrade trade) {
         String sql = """
             INSERT INTO executed_trades
-              (token, symbol, strategy_name, entry_price, quantity, side, status,
+              (pos_key, token, symbol, strategy_name, entry_price, quantity, side, status,
                stop_loss, take_profit, exchange, entry_time)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
             """;
         try (Connection conn = db.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
-            ps.setString(1, trade.getToken());
-            ps.setString(2, trade.getSymbol());
-            ps.setString(3, trade.getStrategyName());
-            ps.setDouble(4, trade.getEntryPrice());
-            ps.setInt(   5, trade.getQuantity());
-            ps.setString(6, trade.getSide());
-            ps.setString(7, trade.getStatus());
-            ps.setDouble(8, trade.getStopLoss());
-            ps.setDouble(9, trade.getTakeProfit());
-            ps.setString(10, trade.getExchange());
-            ps.setTimestamp(11, Timestamp.valueOf(trade.getEntryTime()));
+            ps.setString(1, trade.getPosKey());
+            ps.setString(2, trade.getToken());
+            ps.setString(3, trade.getSymbol());
+            ps.setString(4, trade.getStrategyName());
+            ps.setDouble(5, trade.getEntryPrice());
+            ps.setInt(   6, trade.getQuantity());
+            ps.setString(7, trade.getSide());
+            ps.setString(8, trade.getStatus());
+            ps.setDouble(9, trade.getStopLoss());
+            ps.setDouble(10, trade.getTakeProfit());
+            ps.setString(11, trade.getExchange());
+            ps.setTimestamp(12, Timestamp.valueOf(trade.getEntryTime()));
             ps.executeUpdate();
             try (ResultSet keys = ps.getGeneratedKeys()) {
                 if (keys.next()) trade.setId(keys.getInt(1));
@@ -82,6 +83,7 @@ public class ExecutedTradeRepository {
     private ExecutedTrade mapRow(ResultSet rs) throws SQLException {
         ExecutedTrade t = new ExecutedTrade();
         t.setId(rs.getInt("id"));
+        t.setPosKey(rs.getString("pos_key"));
         t.setToken(rs.getString("token"));
         t.setSymbol(rs.getString("symbol"));
         t.setStrategyName(rs.getString("strategy_name"));
@@ -98,9 +100,10 @@ public class ExecutedTradeRepository {
     }
 
     private void ensureTable() {
-        String sql = """
+        String create = """
             CREATE TABLE IF NOT EXISTS executed_trades (
                 id             SERIAL PRIMARY KEY,
+                pos_key        VARCHAR(100),
                 token          VARCHAR(20),
                 symbol         VARCHAR(50),
                 strategy_name  VARCHAR(50),
@@ -117,9 +120,11 @@ public class ExecutedTradeRepository {
                 pnl            DOUBLE PRECISION
             )
             """;
+        String alter = "ALTER TABLE executed_trades ADD COLUMN IF NOT EXISTS pos_key VARCHAR(100)";
         try (Connection conn = db.getConnection();
              Statement st = conn.createStatement()) {
-            st.execute(sql);
+            st.execute(create);
+            st.execute(alter);
         } catch (SQLException e) {
             log.error("Create executed_trades table failed: {}", e.getMessage());
         }

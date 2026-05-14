@@ -5,6 +5,7 @@ import java.time.LocalDateTime;
 public class ExecutedTrade {
 
     private int           id;
+    private String        posKey;
     private String        token;
     private String        symbol;
     private String        strategyName;
@@ -25,6 +26,9 @@ public class ExecutedTrade {
     // Getters and setters
     public int           getId()           { return id; }
     public void          setId(int id)     { this.id = id; }
+
+    public String        getPosKey()       { return posKey; }
+    public void          setPosKey(String v) { this.posKey = v; }
 
     public String        getToken()        { return token; }
     public void          setToken(String v) { this.token = v; }
