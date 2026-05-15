@@ -48,6 +48,19 @@ public class MultiIndicatorConfluenceStrategy implements Strategy {
     }
 
     @Override
+    public Signal evaluate(StrategyContext ctx) {
+        Signal sig = evaluate(ctx != null ? ctx.candles() : List.of());
+        if (sig == Signal.NONE && ctx != null) {
+            String reason = lastSignal.reason();
+            // suppress high-frequency expected reasons to avoid log spam
+            if (!reason.startsWith("outside_entry") && !reason.startsWith("insufficient")) {
+                log.info("MICS | {} | no-signal: {}", ctx.symbol(), reason);
+            }
+        }
+        return sig;
+    }
+
+    @Override
     public double suggestStopLoss(List<Candle> candles, Signal signal) {
         return lastSignal.suggestedStopLoss();
     }

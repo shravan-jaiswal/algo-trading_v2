@@ -30,8 +30,8 @@ public class CandleRepository {
             """;
         try (Connection conn = db.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, c.getToken());
-            ps.setString(2, c.getTimeframe());
+            ps.setString(1, sanitize(c.getToken()));
+            ps.setString(2, sanitize(c.getTimeframe()));
             ps.setTimestamp(3, Timestamp.valueOf(c.getTs()));
             ps.setDouble(4, c.getOpen());
             ps.setDouble(5, c.getHigh());
@@ -90,6 +90,11 @@ public class CandleRepository {
             log.error("findBetween failed: {}", e.getMessage());
         }
         return result;
+    }
+
+    /** Strips null bytes that the broker WebSocket occasionally embeds in token strings. */
+    private static String sanitize(String s) {
+        return s == null ? null : s.replaceAll("\\u0000", "");
     }
 
     private Candle mapRow(ResultSet rs) throws SQLException {

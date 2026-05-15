@@ -15,4 +15,8 @@ public record Tick(
     public static Tick ltpOnly(String token, double ltp) {
         return new Tick(token, ltp, 0, 0, 0, 0, 0, LocalDateTime.now());
     }
+
+    public static Tick withVolume(String token, double ltp, double volume) {
+        return new Tick(token, ltp, 0, 0, 0, 0, volume, LocalDateTime.now());
+    }
 }

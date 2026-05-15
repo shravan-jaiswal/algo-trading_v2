@@ -142,6 +142,8 @@ ssh root@103.212.121.27
 ### Live logs (cleanest — like old screen session)
 ```bash
 journalctl -u algo-trading_v2 -f -o cat
+#or
+ssh root@103.212.121.27 "journalctl -u algo-trading_v2 -f -o cat"
 ```
 
 ### Live logs from log file
@@ -312,3 +314,5 @@ HEALTH CHECK    → http://103.212.121.27:8080/health
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 /help  /status  /pnl  /positions  /halt  /resume  /closeall
 ```
+
+## W

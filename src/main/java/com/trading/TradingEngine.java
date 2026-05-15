@@ -156,15 +156,13 @@ public class TradingEngine {
         backfillHistory();
         restoreOpenTrades();
 
-        if (!paperMode) {
-            List<String> tokens = watchlist.stream().map(WatchlistItem::token).toList();
-            feed = new SmartStreamFeed(
-                    angelClient.getSmartConnect(),
-                    angelClient.getClientId(),
-                    angelClient.getFeedToken(),
-                    this::onTick);
-            feed.subscribe(tokens, "NSE");
-        }
+        List<String> tokens = watchlist.stream().map(WatchlistItem::token).toList();
+        feed = new SmartStreamFeed(
+                angelClient.getSmartConnect(),
+                angelClient.getClientId(),
+                angelClient.getFeedToken(),
+                this::onTick);
+        feed.subscribe(tokens, "NSE");
 
         tradeMonitor.start(15);
         if (AppConfig.getBool("health.enabled", true)) dashboard.start();
@@ -198,7 +196,6 @@ public class TradingEngine {
             "Strategies: " + String.join(", ", strategyNames));
         log.info("TradingEngine running.");
 
-        if (paperMode) runPaperLoop();
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -627,24 +624,33 @@ public class TradingEngine {
 
     private void backfillHistory() {
         if (watchlist.isEmpty()) return;
-        int days = AppConfig.getInt("candle.history.bars", 200) / 75;
+        int days = Math.max(AppConfig.getInt("candle.history.bars", 200) / 75, 5);
 
         for (WatchlistItem item : watchlist) {
             try {
                 var historical = candleRepo.findRecent(item.token(), timeframe, candleHistoryBars);
-                if (historical.size() >= candleHistoryBars / 2) {
-                    tickProcessor.seed(item.token(), historical);
-                    continue;
-                }
+
+                // Fetch from API if connected and there is a gap (last candle is older than one interval)
                 if (dataFetcher.isConnected()) {
-                    var fetched = dataFetcher.backfill(item, timeframe, Math.max(days, 5));
-                    if (!fetched.isEmpty()) {
-                        tickProcessor.seed(item.token(), fetched);
+                    LocalDateTime lastTs = historical.isEmpty()
+                            ? null
+                            : historical.get(historical.size() - 1).getTs();
+                    LocalDateTime now = LocalDateTime.now(MarketUtils.IST);
+                    boolean hasGap = lastTs == null
+                            || lastTs.isBefore(now.minusMinutes(timeframeMinutes()));
+
+                    if (hasGap || historical.size() < candleHistoryBars / 2) {
+                        log.info("Gap detected for {} — fetching from API (last candle: {})",
+                                item.symbol(), lastTs);
+                        var fetched = dataFetcher.backfill(item, timeframe, days);
+                        if (!fetched.isEmpty()) {
+                            // Re-read DB so the seed includes both old + newly fetched candles
+                            historical = candleRepo.findRecent(item.token(), timeframe, candleHistoryBars);
+                        }
                         try { Thread.sleep(600); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
-                        continue;
                     }
-                    try { Thread.sleep(600); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
                 }
+
                 tickProcessor.seed(item.token(), historical);
             } catch (Exception e) {
                 log.error("Backfill failed for {}: {}", item.symbol(), e.getMessage());

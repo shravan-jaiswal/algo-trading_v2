@@ -24,7 +24,7 @@ public class SmartStreamFeed {
     private static final double       PRICE_SCALE = Double.parseDouble(
             AppConfig.get("angel.smartstream.price.scale", "100"));
     private static final SmartStreamSubsMode SUBS_MODE = parseSubsMode(
-            AppConfig.get("angel.smartstream.mode", "LTP"));
+            AppConfig.get("feed.mode", "LTP"));
 
     private final String         clientId;
     private final String         feedToken;
@@ -70,10 +70,11 @@ public class SmartStreamFeed {
                 public void onQuoteArrival(Quote quote) {
                     if (quote == null || quote.getToken() == null) return;
                     lastTickMs = System.currentTimeMillis();
-                    double price = quote.getLastTradedPrice() / PRICE_SCALE;
+                    double price  = quote.getLastTradedPrice() / PRICE_SCALE;
+                    double volume = quote.getLastTradedQuantity();
                     if (price > 0) {
-                        tickHandler.accept(Tick.ltpOnly(
-                                quote.getToken().getToken(), price));
+                        tickHandler.accept(Tick.withVolume(
+                                quote.getToken().getToken(), price, volume));
                     }
                 }
 
