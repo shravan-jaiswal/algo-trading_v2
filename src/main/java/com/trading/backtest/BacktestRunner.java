@@ -38,6 +38,11 @@ public class BacktestRunner {
         String stratName = args[2];
         int    days      = Integer.parseInt(args[3]);
 
+        if ("ALL".equalsIgnoreCase(token)) {
+            runAll(timeframe, stratName, days);
+            return;
+        }
+
         DatabaseConfig     db     = new DatabaseConfig();
         CandleRepository   repo   = new CandleRepository(db);
 

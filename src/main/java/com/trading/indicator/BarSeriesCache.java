@@ -88,7 +88,7 @@ public final class BarSeriesCache {
         int idx   = series.getEndIndex();
         double mid   = sma.getValue(idx).doubleValue();
         double sigma = std.getValue(idx).doubleValue();
-        return new BollingerValues(mid - k * sigma, mid, mid + k * sigma, sigma * 2);
+        return new BollingerValues(mid - k * sigma, mid, mid + k * sigma, k * sigma * 2);
     }
 
     public double adx(int period) {

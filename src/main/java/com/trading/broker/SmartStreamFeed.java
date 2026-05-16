@@ -71,7 +71,7 @@ public class SmartStreamFeed {
                     if (quote == null || quote.getToken() == null) return;
                     lastTickMs = System.currentTimeMillis();
                     double price  = quote.getLastTradedPrice() / PRICE_SCALE;
-                    double volume = quote.getLastTradedQuantity();
+                    double volume = quote.getLastTradedQty();
                     if (price > 0) {
                         tickHandler.accept(Tick.withVolume(
                                 quote.getToken().getToken(), price, volume));

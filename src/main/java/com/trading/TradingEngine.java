@@ -93,6 +93,9 @@ public class TradingEngine {
     // ── Telegram ──────────────────────────────────────────────────────
     private TelegramCommandListener telegramListener;
 
+    // ── Cycle counter (increments on every candle close, any token) ──
+    private final java.util.concurrent.atomic.AtomicInteger cycleCounter = new java.util.concurrent.atomic.AtomicInteger(0);
+
     // ── Shutdown ──────────────────────────────────────────────────────
     private volatile boolean running = false;
 
@@ -230,6 +233,17 @@ public class TradingEngine {
         });
 
         signalEvaluator.evaluate(symbol, underlyingToken, underlyingPrice, candles);
+
+        int cycle = cycleCounter.incrementAndGet();
+        log.info("Cycle #{} | {} @ Rs.{} | candles:{} | open:{} | pnl:Rs.{}",
+                cycle, symbol,
+                String.format("%.2f", underlyingPrice),
+                candles.size(),
+                orderManager.getOpenPositions().size(),
+                String.format("%.2f", riskManager.getDailyProfit() - riskManager.getDailyLoss()));
+        if (cycle % 12 == 0) {
+            riskManager.printStatus();
+        }
 
         if (MarketUtils.isSquareOffTime()) {
             forceSquareOff(underlyingToken, symbol, exchange, underlyingPrice);
@@ -647,7 +661,7 @@ public class TradingEngine {
                             // Re-read DB so the seed includes both old + newly fetched candles
                             historical = candleRepo.findRecent(item.token(), timeframe, candleHistoryBars);
                         }
-                        try { Thread.sleep(600); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                        try { Thread.sleep(1200); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
                     }
                 }
 
