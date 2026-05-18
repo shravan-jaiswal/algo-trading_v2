@@ -60,7 +60,7 @@ public class VwapSupertrendRsiStrategy implements Strategy {
     }
 
     @Override
-    public String getName() { return "VWAP_SUPERTREND_RSI"; }
+    public String getName() { return "VSRSI"; }
 
     @Override
     public Signal evaluate(List<Candle> candles) {

@@ -7,6 +7,7 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Runs all registered strategies against a candle snapshot and publishes
@@ -25,14 +26,16 @@ public final class SignalEvaluator {
     }
 
     /**
-     * Evaluates all strategies sequentially on the given candle list.
-     * Publishes one SignalEvent per strategy that returns BUY or SELL.
+     * Evaluates only the strategies assigned to this symbol.
+     * allowedStrategies: set of strategy names (uppercase) from watchlist.strategies column.
      */
     public void evaluate(String symbol, String token,
-                         double currentPrice, List<Candle> candles) {
+                         double currentPrice, List<Candle> candles,
+                         Set<String> allowedStrategies) {
         if (candles == null || candles.isEmpty()) return;
 
         for (Strategy strategy : strategies) {
+            if (!allowedStrategies.contains(strategy.getName().toUpperCase())) continue;
             if (candles.size() < strategy.getMinCandles()) continue;
 
             try {

@@ -25,7 +25,12 @@ public record MicsConfig(
         LocalTime entryStart,
         LocalTime entryCutoff,
         int       minConfluenceScore,
-        boolean   useVwapGate
+        boolean   useVwapGate,
+        // ── v2 quality filters ──────────────────────────
+        int       adxPeriod,         // ADX lookback (14)
+        double    adxThreshold,      // min ADX on 15m to allow trading (22 = trending)
+        double    volSpikeRatio,     // current bar volume / 20-bar avg must exceed this (1.2)
+        int       volAvgPeriod       // bars for volume average (20)
 ) {
     public MicsConfig {
         if (emaFast >= emaSlow)
@@ -41,13 +46,14 @@ public record MicsConfig(
     public static MicsConfig defaults() {
         return new MicsConfig(
             10, 30,
-            14, 50.0, 70.0, 30.0, 50.0,
+            14, 52.0, 80.0, 20.0, 48.0,
             12, 26, 9,
             20, 2.0, 0.005,
             14, 1.5,
             0.02, 0.03,
             LocalTime.of(9, 30), LocalTime.of(14, 0),
-            3, true
+            3, true,
+            14, 22.0, 1.2, 20
         );
     }
 
@@ -56,10 +62,10 @@ public record MicsConfig(
             AppConfig.getInt(   "strategy.mics.ema.fast",              10),
             AppConfig.getInt(   "strategy.mics.ema.slow",              30),
             AppConfig.getInt(   "strategy.mics.rsi.period",            14),
-            AppConfig.getDouble("strategy.mics.rsi.bull.low",          50),
-            AppConfig.getDouble("strategy.mics.rsi.bull.high",         70),
-            AppConfig.getDouble("strategy.mics.rsi.bear.low",          30),
-            AppConfig.getDouble("strategy.mics.rsi.bear.high",         50),
+            AppConfig.getDouble("strategy.mics.rsi.bull.low",          52),
+            AppConfig.getDouble("strategy.mics.rsi.bull.high",         80),
+            AppConfig.getDouble("strategy.mics.rsi.bear.low",          20),
+            AppConfig.getDouble("strategy.mics.rsi.bear.high",         48),
             AppConfig.getInt(   "strategy.mics.macd.short",            12),
             AppConfig.getInt(   "strategy.mics.macd.long",             26),
             AppConfig.getInt(   "strategy.mics.macd.signal",            9),
@@ -72,8 +78,12 @@ public record MicsConfig(
             AppConfig.getDouble("strategy.mics.hedge.spread.threshold", 0.03),
             LocalTime.parse(AppConfig.get("strategy.mics.entry.start",  "09:30")),
             LocalTime.parse(AppConfig.get("strategy.mics.entry.cutoff", "14:00")),
-            AppConfig.getInt( "strategy.mics.min.confluence.score",    3),
-            AppConfig.getBool("strategy.mics.use.vwap.gate",           true)
+            AppConfig.getInt(   "strategy.mics.min.confluence.score",   3),
+            AppConfig.getBool(  "strategy.mics.use.vwap.gate",          true),
+            AppConfig.getInt(   "strategy.mics.adx.period",            14),
+            AppConfig.getDouble("strategy.mics.adx.threshold",         22.0),
+            AppConfig.getDouble("strategy.mics.vol.spike.ratio",        1.2),
+            AppConfig.getInt(   "strategy.mics.vol.avg.period",        20)
         );
     }
 }

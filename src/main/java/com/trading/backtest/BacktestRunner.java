@@ -61,7 +61,7 @@ public class BacktestRunner {
         Strategy strategy = buildStrategy(stratName);
 
         RiskConfig     riskConfig = RiskConfig.fromAppConfig();
-        BacktestEngine engine     = new BacktestEngine(strategy, riskConfig);
+        BacktestEngine engine     = new BacktestEngine(strategy, riskConfig, isIntraday(stratName));
         BacktestEngine.BacktestResult result = engine.run(candles);
         result.print();
 
@@ -96,13 +96,17 @@ public class BacktestRunner {
         int    ran           = 0;
 
         for (WatchlistItem item : watchlist) {
+            if (!item.hasStrategy(stratName)) {
+                log.debug("Skipping {} — not configured for {}", item.symbol(), stratName);
+                continue;
+            }
             List<Candle> candles = repo.findBetween(item.token(), timeframe, from, to);
             if (candles.isEmpty()) {
                 log.warn("No candles for {} ({}) - skipping", item.symbol(), item.token());
                 continue;
             }
             Strategy strategy = buildStrategy(stratName);
-            BacktestEngine engine = new BacktestEngine(strategy, riskConfig);
+            BacktestEngine engine = new BacktestEngine(strategy, riskConfig, isIntraday(stratName));
             BacktestEngine.BacktestResult r = engine.run(candles);
             log.info("=== {} ({}) ===", item.symbol(), item.token());
             r.print();
@@ -137,6 +141,14 @@ public class BacktestRunner {
         log.info("==================================================");
 
         db.close();
+    }
+
+    /** MICS and MA are intraday-only; VSRSI is positional (holds overnight). */
+    private static boolean isIntraday(String stratName) {
+        return switch (stratName.toUpperCase()) {
+            case "VSRSI" -> false;
+            default      -> true;
+        };
     }
 
     private static Strategy buildStrategy(String stratName) {

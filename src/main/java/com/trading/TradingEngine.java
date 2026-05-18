@@ -232,7 +232,7 @@ public class TradingEngine {
             checkAndExit(posKey, underlyingToken, symbol, exchange, underlyingPrice);
         });
 
-        signalEvaluator.evaluate(symbol, underlyingToken, underlyingPrice, candles);
+        signalEvaluator.evaluate(symbol, underlyingToken, underlyingPrice, candles, item.strategies());
 
         int cycle = cycleCounter.incrementAndGet();
         log.info("Cycle #{} | {} @ Rs.{} | candles:{} | open:{} | pnl:Rs.{}",
@@ -781,18 +781,13 @@ public class TradingEngine {
 
         List<Strategy> list = new ArrayList<>();
 
-        var mics = new MultiIndicatorConfluenceStrategy(
-                com.trading.strategy.mics.MicsConfig.fromAppConfig(), micsInstr);
-
-        list.add(mics);
-
-        // MA Crossover and VSRSI use the same instrument type so all strategies trade consistently
-        /*
-        list.add(new MACrossoverStrategy(
-                AppConfig.getInt("strategy.ma.fast", 10),
-                AppConfig.getInt("strategy.ma.slow", 30),
-                AppConfig.get(   "strategy.ma.type", "EMA"),
-                micsInstr));
+        // ── VSRSI — always FUTURES ────────────────────────────────────
+        InstrumentConfig vsrsiInstr = new InstrumentConfig(
+                com.trading.strategy.InstrumentType.FUTURES, "NFO",
+                AppConfig.getInt("trading.futures.expiry.offset", 0),
+                0,
+                AppConfig.getInt("trading.futures.lots", 1),
+                true);
 
         list.add(new VwapSupertrendRsiStrategy(
                 AppConfig.getInt(   "strategy.vsrsi.atr.period",      10),
@@ -804,8 +799,15 @@ public class TradingEngine {
                 AppConfig.getDouble("strategy.vsrsi.rsi.bear.high",   60),
                 java.time.LocalTime.parse(AppConfig.get("strategy.vsrsi.entry.start",  "09:30")),
                 java.time.LocalTime.parse(AppConfig.get("strategy.vsrsi.entry.cutoff", "14:30")),
-                micsInstr));
-        */
+                vsrsiInstr));
+
+        // ── MICS — always OPTION_BUY ──────────────────────────────────
+        InstrumentConfig micsOptionInstr = InstrumentConfig.optionBuy(
+                AppConfig.getInt("trading.option.expiry.offset", 0),
+                AppConfig.getInt("trading.option.strike.offset", 0),
+                AppConfig.getInt("trading.option.lots",          1));
+        list.add(new MultiIndicatorConfluenceStrategy(
+                com.trading.strategy.mics.MicsConfig.fromAppConfig(), micsOptionInstr));
         list.forEach(s -> strategyMap.put(s.getName(), s));
         return list;
     }

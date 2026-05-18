@@ -21,15 +21,30 @@ separate backtest implementation.
 
 ---
 
-## How to Run (PowerShell)
+## How to Run
+
+Two equivalent ways to run — use whichever works in your environment.
+
+### Option A — Maven (development, source tree)
 
 > Use **single quotes** around `-D` flags in PowerShell to prevent argument mangling.
-
-### Single Symbol
 
 ```powershell
 mvn exec:java '-Dexec.mainClass=com.trading.backtest.BacktestRunner' '-Dexec.args=<token> <timeframe> <strategy> <days>'
 ```
+
+### Option B — Fat JAR (VPS / after `mvn package`)
+
+```bash
+java -cp "target/algo-trading-v2-2.0.0.jar" com.trading.backtest.BacktestRunner <token> <timeframe> <strategy> <days>
+```
+
+Build the jar once before using Option B:
+```bash
+mvn package -DskipTests -q
+```
+
+---
 
 **Arguments:**
 
@@ -40,11 +55,11 @@ mvn exec:java '-Dexec.mainClass=com.trading.backtest.BacktestRunner' '-Dexec.arg
 | `strategy`  | Strategy name: `MICS`, `MA`, `VSRSI`           | `MICS`         |
 | `days`      | Number of historical days to test              | `60`           |
 
-**Examples:**
+**Examples (Option A):**
 
 ```powershell
 # NIFTY 50 — MICS strategy — last 60 days
-mvn exec:java '-Dexec.mainClass=com.trading.backtest.BacktestRunner' '-Dexec.args=2885 FIVE_MINUTE MICS 60'
+mvn exec:java '-Dexec.mainClass=com.trading.backtest.BacktestRunner' '-Dexec.args=99926000 FIVE_MINUTE MICS 60'
 
 # RELIANCE — MA Crossover — last 30 days
 mvn exec:java '-Dexec.mainClass=com.trading.backtest.BacktestRunner' '-Dexec.args=2885 FIVE_MINUTE MA 30'
@@ -53,12 +68,26 @@ mvn exec:java '-Dexec.mainClass=com.trading.backtest.BacktestRunner' '-Dexec.arg
 mvn exec:java '-Dexec.mainClass=com.trading.backtest.BacktestRunner' '-Dexec.args=11536 FIVE_MINUTE VSRSI 90'
 ```
 
+**Examples (Option B):**
+
+```bash
+java -cp "target/algo-trading-v2-2.0.0.jar" com.trading.backtest.BacktestRunner 99926000 FIVE_MINUTE MICS 60
+java -cp "target/algo-trading-v2-2.0.0.jar" com.trading.backtest.BacktestRunner 2885 FIVE_MINUTE MA 30
+java -cp "target/algo-trading-v2-2.0.0.jar" com.trading.backtest.BacktestRunner 11536 FIVE_MINUTE VSRSI 90
+```
+
 ---
 
 ### All Watchlist Symbols
 
 ```powershell
+# Option A
 mvn exec:java '-Dexec.mainClass=com.trading.backtest.BacktestRunner' '-Dexec.args=ALL FIVE_MINUTE MICS 60'
+```
+
+```bash
+# Option B
+java -cp "target/algo-trading-v2-2.0.0.jar" com.trading.backtest.BacktestRunner ALL FIVE_MINUTE MICS 60
 ```
 
 Runs the strategy on every active symbol in the watchlist and prints a portfolio summary at the end.

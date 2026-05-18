@@ -21,38 +21,26 @@ public class WatchlistRepository {
 
     public List<WatchlistItem> findAll() {
         List<WatchlistItem> items = new ArrayList<>();
-        // Try full query first; fall back without instrument_type for legacy v1 schema
         try {
-            items = query("SELECT token, symbol, exchange, instrument_type FROM watchlist WHERE active=true", true);
+            items = query("SELECT token, symbol, exchange, instrument_type, strategies FROM watchlist WHERE active=true");
         } catch (SQLException e) {
-            if (e.getMessage() != null && e.getMessage().contains("instrument_type")) {
-                log.warn("instrument_type column missing - run migration: " +
-                         "ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS instrument_type VARCHAR(10) NOT NULL DEFAULT 'EQ'; " +
-                         "Defaulting all instruments to EQ.");
-                try {
-                    items = query("SELECT token, symbol, exchange FROM watchlist WHERE active=true", false);
-                } catch (SQLException ex) {
-                    log.error("Watchlist load failed: {}", ex.getMessage());
-                }
-            } else {
-                log.error("Watchlist load failed: {}", e.getMessage());
-            }
+            log.error("Watchlist load failed: {}", e.getMessage());
         }
         return items;
     }
 
-    private List<WatchlistItem> query(String sql, boolean hasInstrumentType) throws SQLException {
+    private List<WatchlistItem> query(String sql) throws SQLException {
         List<WatchlistItem> items = new ArrayList<>();
         try (Connection conn = db.getConnection();
              Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(sql)) {
             while (rs.next()) {
-                String instrType = hasInstrumentType ? rs.getString("instrument_type") : "EQ";
                 items.add(new WatchlistItem(
                     rs.getString("token"),
                     rs.getString("symbol"),
                     rs.getString("exchange"),
-                    instrType
+                    rs.getString("instrument_type"),
+                    WatchlistItem.parseStrategies(rs.getString("strategies"))
                 ));
             }
         }
@@ -67,16 +55,14 @@ public class WatchlistRepository {
                     token           VARCHAR(20) PRIMARY KEY,
                     symbol          VARCHAR(50) NOT NULL,
                     exchange        VARCHAR(10) NOT NULL,
-                    instrument_type VARCHAR(10) NOT NULL DEFAULT 'EQ',
-                    active          BOOLEAN NOT NULL DEFAULT true
+                    instrument_type VARCHAR(10)  NOT NULL DEFAULT 'EQ',
+                    active          BOOLEAN      NOT NULL DEFAULT true,
+                    strategies      VARCHAR(200) NOT NULL DEFAULT 'VSRSI'
                 )
                 """);
-            // Best-effort migration for existing v1 tables (requires table ownership)
-            try {
-                st.execute("ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS instrument_type VARCHAR(10) NOT NULL DEFAULT 'EQ'");
-            } catch (SQLException ignored) {
-                // Will be handled gracefully in findAll() if column is still missing
-            }
+            // Best-effort migrations for older schemas
+            try { st.execute("ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS instrument_type VARCHAR(10) NOT NULL DEFAULT 'EQ'"); } catch (SQLException ignored) {}
+            try { st.execute("ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS strategies VARCHAR(200) NOT NULL DEFAULT 'VSRSI'"); } catch (SQLException ignored) {}
         } catch (SQLException e) {
             log.warn("Watchlist table setup: {}", e.getMessage());
         }

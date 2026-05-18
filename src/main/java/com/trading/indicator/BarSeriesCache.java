@@ -97,6 +97,45 @@ public final class BarSeriesCache {
                 .getValue(series.getEndIndex()).doubleValue();
     }
 
+    /** RSI value N bars before the last bar. */
+    public double rsiAt(int period, int barsBack) {
+        int idx = series.getEndIndex() - barsBack;
+        if (idx < period + 1) return 0;
+        return new RSIIndicator(close, period).getValue(idx).doubleValue();
+    }
+
+    /** MACD histogram value N bars before the last bar. */
+    public double macdHistAt(int fast, int slow, int signal, int barsBack) {
+        int idx = series.getEndIndex() - barsBack;
+        if (idx < slow + signal || idx < 0) return 0;
+        var macd = new MACDIndicator(close, fast, slow);
+        var sig  = new EMAIndicator(macd, signal);
+        return macd.getValue(idx).doubleValue() - sig.getValue(idx).doubleValue();
+    }
+
+    /** EMA value N bars before the last bar. */
+    public double emaAt(int period, int barsBack) {
+        int idx = series.getEndIndex() - barsBack;
+        if (idx < period) return 0;
+        return new EMAIndicator(close, period).getValue(idx).doubleValue();
+    }
+
+    /**
+     * Ratio of the current bar's volume to the average volume of the preceding avgPeriod bars.
+     * Returns 0 if data is insufficient or average is zero.
+     */
+    public double volumeRatio(int avgPeriod) {
+        int idx = series.getEndIndex();
+        if (idx < avgPeriod) return 0;
+        double curVol = series.getBar(idx).getVolume().doubleValue();
+        double sumVol = 0;
+        for (int i = idx - avgPeriod; i < idx; i++) {
+            sumVol += series.getBar(i).getVolume().doubleValue();
+        }
+        double avgVol = sumVol / avgPeriod;
+        return avgVol > 0 ? curVol / avgVol : 0;
+    }
+
     public record BollingerValues(double lower, double mid, double upper, double bandwidth) {
         static final BollingerValues EMPTY = new BollingerValues(0, 0, 0, 0);
 
