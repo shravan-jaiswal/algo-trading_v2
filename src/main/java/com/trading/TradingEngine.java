@@ -228,6 +228,11 @@ public class TradingEngine {
     // ─────────────────────────────────────────────────────────────────
 
     private void onTick(Tick tick) {
+        if (!MarketUtils.isRegularMarketSession(tick.ts())) {
+            log.debug("Ignoring after-hours tick | token={} ts={} ltp={}",
+                    tick.token(), tick.ts(), tick.ltp());
+            return;
+        }
         latestLtp.put(tick.token(), tick.ltp());
         Candle closed = tickProcessor.process(tick);
         if (closed != null) {

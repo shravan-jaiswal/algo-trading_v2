@@ -3,6 +3,7 @@ package com.trading.data;
 import com.angelbroking.smartapi.SmartConnect;
 import com.trading.model.Candle;
 import com.trading.model.WatchlistItem;
+import com.trading.utils.MarketUtils;
 import org.json.JSONArray;
 import org.json.JSONObject;
 // JSONObject is used for the candleData params
@@ -57,7 +58,7 @@ public class HistoricalDataFetcher {
             for (int i = 0; i < data.length(); i++) {
                 JSONArray row = data.getJSONArray(i);
                 Candle c = parseRow(item.token(), timeframe, row);
-                if (c != null) {
+                if (c != null && MarketUtils.isRegularMarketSession(c.getTs())) {
                     candles.add(c);
                     candleRepo.upsert(c);
                 }

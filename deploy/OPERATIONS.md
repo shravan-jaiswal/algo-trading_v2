@@ -479,6 +479,7 @@ Expected behavior:
 - at `14:10`, the `14:10` row should appear after the first tick in that slot
 - at `14:13`, the `14:10` row is still in progress and may keep updating
 - at `14:15`, the `14:10` candle is complete and signal evaluation should happen
+- after `market.close`, no new regular candle slots should be created
 
 If volume is `0`, confirm SmartStream quote mode is enabled:
 ```bash
@@ -487,6 +488,13 @@ grep "feed.mode" /opt/algo-trading_v2/application.properties
 Expected:
 ```properties
 feed.mode=QUOTE
+```
+
+Remove accidental after-market candle rows:
+```sql
+DELETE FROM public.candles
+WHERE ts::time >= TIME '15:30'
+   OR ts::time <  TIME '09:15';
 ```
 
 ### Signals are not firing

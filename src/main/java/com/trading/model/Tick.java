@@ -1,5 +1,7 @@
 package com.trading.model;
 
+import com.trading.utils.MarketUtils;
+
 import java.time.LocalDateTime;
 
 public record Tick(
@@ -13,10 +15,10 @@ public record Tick(
         LocalDateTime ts
 ) {
     public static Tick ltpOnly(String token, double ltp) {
-        return new Tick(token, ltp, 0, 0, 0, 0, 0, LocalDateTime.now());
+        return new Tick(token, ltp, 0, 0, 0, 0, 0, LocalDateTime.now(MarketUtils.IST));
     }
 
     public static Tick withVolume(String token, double ltp, double volume) {
-        return new Tick(token, ltp, 0, 0, 0, 0, volume, LocalDateTime.now());
+        return new Tick(token, ltp, 0, 0, 0, 0, volume, LocalDateTime.now(MarketUtils.IST));
     }
 }

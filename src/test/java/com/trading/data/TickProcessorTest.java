@@ -27,4 +27,24 @@ class TickProcessorTest {
         assertEquals(LocalDateTime.of(2026, 5, 19, 14, 10),
                 processor.getCandles("1333").get(1).getTs());
     }
+
+    @Test
+    void ignoresTicksOutsideRegularMarketSession() {
+        TickProcessor processor = new TickProcessor(5, null);
+
+        LocalDateTime afterClose = LocalDateTime.of(2026, 5, 19, 20, 30);
+
+        assertNull(processor.process(new Tick("1333", 101, 0, 0, 0, 0, 13, afterClose)));
+        assertTrue(processor.getCandles("1333").isEmpty());
+    }
+
+    @Test
+    void doesNotOpenCandleAtMarketCloseBoundary() {
+        TickProcessor processor = new TickProcessor(5, null);
+
+        LocalDateTime closeBoundary = LocalDateTime.of(2026, 5, 19, 15, 30);
+
+        assertNull(processor.process(new Tick("1333", 101, 0, 0, 0, 0, 13, closeBoundary)));
+        assertTrue(processor.getCandles("1333").isEmpty());
+    }
 }

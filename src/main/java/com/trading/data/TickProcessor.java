@@ -48,6 +48,11 @@ public class TickProcessor {
         double        ltp      = tick.ltp();
         // Use exchange timestamp from tick (IST) — never LocalDateTime.now()
         LocalDateTime now      = tick.ts();
+        if (!MarketUtils.isRegularMarketSession(now)) {
+            log.debug("Ignoring tick outside market session | token:{} ts:{} ltp:{}",
+                    token, now, ltp);
+            return null;
+        }
 
         LocalDateTime barStart = truncate(now, barMinutes);
 
@@ -165,6 +170,11 @@ public class TickProcessor {
 
     private void persistCandle(Candle candle) {
         if (candleRepo == null) return;
+        if (!MarketUtils.isRegularMarketSession(candle.getTs())) {
+            log.debug("Skipping candle outside market session | token:{} time:{}",
+                    candle.getToken(), candle.getTs());
+            return;
+        }
         try {
             candleRepo.upsert(candle);
             log.debug("Candle saved | {} {} O:{} H:{} L:{} C:{} V:{}",

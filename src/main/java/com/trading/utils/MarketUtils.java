@@ -1,10 +1,12 @@
 package com.trading.utils;
 
+import com.trading.config.AppConfig;
 import com.trading.strategy.InstrumentConfig;
 import com.trading.strategy.InstrumentType;
 
 import java.time.DayOfWeek;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
@@ -24,16 +26,32 @@ public final class MarketUtils {
     private MarketUtils() {}
 
     public static boolean isMarketOpen() {
-        ZonedDateTime now = ZonedDateTime.now(IST);
-        DayOfWeek day = now.getDayOfWeek();
+        return isRegularMarketSession(LocalDateTime.now(IST));
+    }
+
+    public static boolean isRegularMarketSession(LocalDateTime ts) {
+        if (ts == null) return false;
+        DayOfWeek day = ts.getDayOfWeek();
         if (day == DayOfWeek.SATURDAY || day == DayOfWeek.SUNDAY) return false;
-        LocalTime t = now.toLocalTime();
-        return !t.isBefore(MARKET_OPEN) && !t.isAfter(MARKET_CLOSE);
+        LocalTime t = ts.toLocalTime();
+        return !t.isBefore(marketOpenTime()) && t.isBefore(marketCloseTime());
     }
 
     public static boolean isSquareOffTime() {
         LocalTime t = ZonedDateTime.now(IST).toLocalTime();
-        return !t.isBefore(SQUARE_OFF);
+        return !t.isBefore(squareOffTime());
+    }
+
+    public static LocalTime marketOpenTime() {
+        return configuredTime("market.open", MARKET_OPEN);
+    }
+
+    public static LocalTime marketCloseTime() {
+        return configuredTime("market.close", MARKET_CLOSE);
+    }
+
+    public static LocalTime squareOffTime() {
+        return configuredTime("market.squareoff", SQUARE_OFF);
     }
 
     public static boolean isTradingDay(LocalDate date) {
@@ -81,5 +99,13 @@ public final class MarketUtils {
 
     public static double sellLimitPrice(double ltp, double slippagePct) {
         return roundToTick(ltp * (1 - slippagePct), TICK_EQUITY);
+    }
+
+    private static LocalTime configuredTime(String key, LocalTime fallback) {
+        try {
+            return LocalTime.parse(AppConfig.get(key, fallback.toString()));
+        } catch (Exception e) {
+            return fallback;
+        }
     }
 }
