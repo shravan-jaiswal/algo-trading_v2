@@ -12,6 +12,7 @@ import org.slf4j.LoggerFactory;
  *   java -jar algo-trading-v2.jar                        # live/paper based on config
  *   java -jar algo-trading-v2.jar --mode paper           # force paper mode
  *   java -jar algo-trading-v2.jar --backtest 60 MICS     # backtest 60 days
+ *   java -jar algo-trading-v2.jar --replay-today -s MICS # replay today's candles
  */
 public class Application {
 
@@ -28,6 +29,9 @@ public class Application {
 
     @Parameter(names = {"--token", "-t"}, description = "Token for backtest (default: all watchlist)")
     private String backtestToken = null;
+
+    @Parameter(names = {"--replay-today"}, description = "Replay today's DB candles through a strategy without trading")
+    private boolean replayToday = false;
 
     @Parameter(names = {"--help", "-h"}, help = true)
     private boolean help;
@@ -58,6 +62,15 @@ public class Application {
                 com.trading.backtest.BacktestRunner.runAll(
                         "FIVE_MINUTE", app.backtestStrategy, app.backtestDays);
             }
+            return;
+        }
+
+        if (app.replayToday) {
+            log.info("Starting today replay | strategy={} token={}",
+                    app.backtestStrategy,
+                    app.backtestToken != null ? app.backtestToken : "ALL");
+            com.trading.diagnostics.TodayReplayRunner.run(
+                    "FIVE_MINUTE", app.backtestStrategy, app.backtestToken);
             return;
         }
 

@@ -18,13 +18,17 @@ import com.trading.risk.RiskManager;
 import com.trading.signal.SignalBus;
 import com.trading.signal.SignalEvaluator;
 import com.trading.signal.SignalEvent;
+import com.trading.strategy.HoldingType;
 import com.trading.strategy.InstrumentConfig;
+import com.trading.strategy.InstrumentType;
 import com.trading.strategy.Strategy;
 import com.trading.strategy.Strategy.Signal;
 import com.trading.strategy.mics.MultiIndicatorConfluenceStrategy;
 import com.trading.strategy.MACrossoverStrategy;
 import com.trading.strategy.VwapSupertrendRsiStrategy;
 import com.trading.utils.MarketUtils;
+import org.json.JSONArray;
+import org.json.JSONObject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -49,6 +53,7 @@ public class TradingEngine {
     private final ExecutedTradeRepository tradeRepo;
     private final TradeLogRepository      tradeLogRepo;
     private final DailySummaryRepository  summaryRepo;
+    private final StrategySignalAuditRepository signalAuditRepo;
     private final HistoricalDataFetcher   dataFetcher;
 
     // ── Broker ────────────────────────────────────────────────────────
@@ -106,6 +111,7 @@ public class TradingEngine {
         this.tradeRepo      = new ExecutedTradeRepository(db);
         this.tradeLogRepo   = new TradeLogRepository(db);
         this.summaryRepo    = new DailySummaryRepository(db);
+        this.signalAuditRepo = new StrategySignalAuditRepository(db);
 
         this.paperMode         = AppConfig.isPaperMode();
         this.timeframe         = AppConfig.get("candle.timeframe", "FIVE_MINUTE");
@@ -125,11 +131,11 @@ public class TradingEngine {
 
         this.signalBus      = new SignalBus();
         List<Strategy> strategies = buildStrategies();
-        this.signalEvaluator = new SignalEvaluator(strategies, signalBus);
+        this.signalEvaluator = new SignalEvaluator(strategies, signalBus, signalAuditRepo);
         signalBus.subscribe(this::onSignal);
 
         this.tradeMonitor = new TradeMonitor(riskManager, orderManager);
-        this.dashboard    = new TradingDashboard(riskManager, orderManager);
+        this.dashboard    = new TradingDashboard(riskManager, orderManager, this::buildRuntimeSnapshot);
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -290,14 +296,14 @@ public class TradingEngine {
         if ("BUY".equals(side)) {
             if (sl > 0 && exitPrice <= sl) {
                 log.info("Fixed SL hit | {} @ Rs.{} | sl=Rs.{}", exitSymbol, exitPrice, sl);
-                exited = exitHandler.forceExit(exitSymbol, exitToken, exitExchange, posKey, exitPrice);
+                exited = exitHandler.forceExit(exitSymbol, exitToken, exitExchange, posKey, exitPrice, "SL");
             } else {
                 exited = exitHandler.checkLongExit(exitSymbol, exitToken, exitExchange, posKey, exitPrice, tp, Signal.NONE);
             }
         } else {
             if (sl > 0 && exitPrice >= sl) {
                 log.info("Fixed SL hit (short) | {} @ Rs.{} | sl=Rs.{}", exitSymbol, exitPrice, sl);
-                exited = exitHandler.forceExit(exitSymbol, exitToken, exitExchange, posKey, exitPrice);
+                exited = exitHandler.forceExit(exitSymbol, exitToken, exitExchange, posKey, exitPrice, "SL");
             } else {
                 exited = exitHandler.checkShortExit(exitSymbol, exitToken, exitExchange, posKey, exitPrice, tp, Signal.NONE);
             }
@@ -331,7 +337,7 @@ public class TradingEngine {
         double price    = event.currentPrice();
         Signal sig      = event.signal();
 
-        if (sig == Signal.BUY && !orderManager.hasOpenPosition(posKey)) {
+        if (sig.isLongEntry() && !orderManager.hasOpenPosition(posKey)) {
             double sl = event.suggestedStopLoss();
             if (sl <= 0) sl = riskManager.calculateStopLoss(price, calcAtr(token), 1.5, sig);
             sl = MarketUtils.roundToTick(sl, com.trading.strategy.InstrumentType.EQUITY);
@@ -339,7 +345,8 @@ public class TradingEngine {
             int qty = riskManager.positionSize(price, sl);
             if (qty <= 0) return;
 
-            boolean opened = orderManager.buy(symbol, token, exchange, posKey, qty, price);
+            boolean opened = orderManager.buy(symbol, token, exchange, posKey, qty, price,
+                    productTypeFor(event.strategyName(), InstrumentType.EQUITY));
             if (opened) {
                 double tp = MarketUtils.roundToTick(
                         riskManager.calculateTakeProfit(price, sl, sig),
@@ -355,9 +362,9 @@ public class TradingEngine {
                         symbol, qty, price, sl, tp);
             }
 
-        } else if (sig == Signal.SELL && orderManager.hasOpenPosition(posKey)) {
+        } else if (sig.isLongExit() && orderManager.hasOpenPosition(posKey)) {
             if ("BUY".equals(orderManager.getPositionSide(posKey))) {
-                boolean exited = exitHandler.checkLongExit(symbol, token, exchange, posKey, price, 0, Signal.SELL);
+                boolean exited = exitHandler.checkLongExit(symbol, token, exchange, posKey, price, 0, sig);
                 if (exited) clearPositionState(posKey, price);
             }
         }
@@ -375,12 +382,22 @@ public class TradingEngine {
         double price      = event.currentPrice();
         Signal sig        = event.signal();
 
-        String optionType = (sig == Signal.BUY) ? "CE" : "PE";
+        if (sig == Signal.LONG_EXIT) {
+            closePositionIfOpen(item.token() + "|" + stratName + "|CE", underlying, price);
+            return;
+        }
+        if (sig == Signal.SHORT_EXIT) {
+            closePositionIfOpen(item.token() + "|" + stratName + "|PE", underlying, price);
+            return;
+        }
+        if (!sig.isEntry()) return;
+
+        String optionType = sig.isLongEntry() ? "CE" : "PE";
         String posKey     = item.token() + "|" + stratName + "|" + optionType;
         if (orderManager.hasOpenPosition(posKey)) return;
 
         // Close opposite leg using its actual token (not the posKey string)
-        String oppType   = (sig == Signal.BUY) ? "PE" : "CE";
+        String oppType   = sig.isLongEntry() ? "PE" : "CE";
         String oppPosKey = item.token() + "|" + stratName + "|" + oppType;
         closePositionIfOpen(oppPosKey, underlying, price);
 
@@ -392,30 +409,33 @@ public class TradingEngine {
 
         String optSymbol = underlying + optionType;
         int    qty       = resolution.lotSize() * instrCfg.numberOfLots();
+        subscribeOptionToken(resolution.token());
+        double optionPrice = tradePriceForInstrument(resolution.token(), price, optSymbol);
+        if (optionPrice <= 0) return;
         log.info("Option order | {} | lotSize={} x {}lots = {} qty",
                 optSymbol, resolution.lotSize(), instrCfg.numberOfLots(), qty);
 
-        boolean opened = orderManager.buy(optSymbol, resolution.token(), "NFO", posKey, qty, price);
+        boolean opened = orderManager.buy(optSymbol, resolution.token(), "NFO", posKey, qty, optionPrice,
+                productTypeFor(stratName, InstrumentType.OPTION_BUY));
         if (opened) {
             double slPct   = AppConfig.getDouble("trading.option.buy.sl.pct", 0);
             double tpPct   = AppConfig.getDouble("trading.option.buy.tp.pct", 0);
             double maxLoss = AppConfig.getDouble("trading.option.buy.max.loss", 3000);
-            double slDist  = (slPct > 0) ? price * slPct : maxLoss / qty;
-            double tpDist  = (tpPct > 0) ? price * tpPct : maxLoss * 2 / qty;
-            double sl = MarketUtils.roundToTick(Math.max(0.05, price - slDist),
+            double slDist  = (slPct > 0) ? optionPrice * slPct : maxLoss / qty;
+            double tpDist  = (tpPct > 0) ? optionPrice * tpPct : maxLoss * 2 / qty;
+            double sl = MarketUtils.roundToTick(Math.max(0.05, optionPrice - slDist),
                     com.trading.strategy.InstrumentType.OPTION_BUY);
-            double tp = MarketUtils.roundToTick(price + tpDist,
+            double tp = MarketUtils.roundToTick(optionPrice + tpDist,
                     com.trading.strategy.InstrumentType.OPTION_BUY);
             takeProfits.put(posKey, tp);
             stopLosses.put(posKey, sl);
             positionTokens.put(posKey, resolution.token());
             positionSymbols.put(posKey, optSymbol);
             positionExchanges.put(posKey, "NFO");
-            subscribeOptionToken(resolution.token());
             saveOpenTrade(posKey, optSymbol, resolution.token(), "NFO",
-                    stratName, "BUY", qty, price, sl, tp);
+                    stratName, "BUY", qty, optionPrice, sl, tp);
             log.info("Option BUY | {} token={} qty={} @ Rs.{} | tp=Rs.{} sl=Rs.{} [{}]",
-                    optSymbol, resolution.token(), qty, price, tp, sl,
+                    optSymbol, resolution.token(), qty, optionPrice, tp, sl,
                     slPct > 0 ? String.format("pct sl=%.0f%% tp=%.0f%%", slPct * 100, tpPct * 100)
                               : String.format("fixed sl=-Rs.%.0f tp=+Rs.%.0f", maxLoss, maxLoss * 2));
         }
@@ -434,12 +454,23 @@ public class TradingEngine {
         Signal sig        = event.signal();
 
         // Bullish → write PE (sell put); bearish → write CE (sell call)
-        String optionType = (sig == Signal.BUY) ? "PE" : "CE";
+        if (sig == Signal.LONG_EXIT) {
+            closePositionIfOpen(item.token() + "|" + stratName + "|WRITE_PE", underlying, price);
+            return;
+        }
+        if (sig == Signal.SHORT_EXIT) {
+            closePositionIfOpen(item.token() + "|" + stratName + "|WRITE_CE", underlying, price);
+            return;
+        }
+        if (!sig.isEntry()) return;
+
+        // Bullish -> write PE (sell put); bearish -> write CE (sell call)
+        String optionType = sig.isLongEntry() ? "PE" : "CE";
         String posKey     = item.token() + "|" + stratName + "|WRITE_" + optionType;
         if (orderManager.hasOpenPosition(posKey)) return;
 
         // Close opposite write leg using its actual token
-        String oppType   = (sig == Signal.BUY) ? "CE" : "PE";
+        String oppType   = sig.isLongEntry() ? "CE" : "PE";
         String oppPosKey = item.token() + "|" + stratName + "|WRITE_" + oppType;
         closePositionIfOpen(oppPosKey, underlying, price);
 
@@ -452,25 +483,28 @@ public class TradingEngine {
 
         String optSymbol = underlying + optionType;
         int    qty       = resolution.lotSize() * instrCfg.numberOfLots();
-        boolean opened = orderManager.sellShort(optSymbol, resolution.token(), "NFO", posKey, qty, price);
+        subscribeOptionToken(resolution.token());
+        double optionPrice = tradePriceForInstrument(resolution.token(), price, optSymbol);
+        if (optionPrice <= 0) return;
+        boolean opened = orderManager.sellShort(optSymbol, resolution.token(), "NFO", posKey, qty, optionPrice,
+                productTypeFor(stratName, InstrumentType.OPTION_WRITE));
         if (opened) {
             double maxProfit = AppConfig.getDouble("trading.option.write.max.profit", 6000);
             double maxLoss   = AppConfig.getDouble("trading.option.write.max.loss",   3000);
             // Short: profit when premium falls (buy back cheaper), loss when it rises
-            double tp = MarketUtils.roundToTick(Math.max(0.05, price - maxProfit / qty),
+            double tp = MarketUtils.roundToTick(Math.max(0.05, optionPrice - maxProfit / qty),
                     com.trading.strategy.InstrumentType.OPTION_WRITE);
-            double sl = MarketUtils.roundToTick(price + maxLoss / qty,
+            double sl = MarketUtils.roundToTick(optionPrice + maxLoss / qty,
                     com.trading.strategy.InstrumentType.OPTION_WRITE);
             takeProfits.put(posKey, tp);
             stopLosses.put(posKey, sl);
             positionTokens.put(posKey, resolution.token());
             positionSymbols.put(posKey, optSymbol);
             positionExchanges.put(posKey, "NFO");
-            subscribeOptionToken(resolution.token());
             saveOpenTrade(posKey, optSymbol, resolution.token(), "NFO",
-                    stratName, "SELL", qty, price, sl, tp);
+                    stratName, "SELL", qty, optionPrice, sl, tp);
             log.info("Option WRITE | {} token={} qty={} @ Rs.{} | buyback_tp=Rs.{} (max+{}) sl=Rs.{} (max-{})",
-                    optSymbol, resolution.token(), qty, price,
+                    optSymbol, resolution.token(), qty, optionPrice,
                     tp, (int) maxProfit, sl, (int) maxLoss);
         }
     }
@@ -497,67 +531,90 @@ public class TradingEngine {
         String futToken  = resolution.token();
         String futSymbol = underlying + "FUT";
         int    qty       = resolution.lotSize() * instrCfg.numberOfLots();
+        subscribeOptionToken(futToken);
+        double futPrice = tradePriceForInstrument(futToken, price, futSymbol);
+        if (futPrice <= 0) return;
 
-        if (sig == Signal.BUY) {
+        if (sig == Signal.LONG_EXIT) {
+            if (orderManager.hasOpenPosition(posKey)
+                    && "BUY".equals(orderManager.getPositionSide(posKey))) {
+                boolean exited = exitHandler.checkLongExit(
+                        futSymbol, futToken, "NFO", posKey, futPrice, 0, sig);
+                if (exited) clearPositionState(posKey, futPrice);
+            }
+            return;
+        }
+        if (sig == Signal.SHORT_EXIT) {
+            if (orderManager.hasOpenPosition(posKey)
+                    && "SELL".equals(orderManager.getPositionSide(posKey))) {
+                boolean exited = exitHandler.checkShortExit(
+                        futSymbol, futToken, "NFO", posKey, futPrice, 0, sig);
+                if (exited) clearPositionState(posKey, futPrice);
+            }
+            return;
+        }
+        if (!sig.isEntry()) return;
+
+        if (sig.isLongEntry()) {
             if (orderManager.hasOpenPosition(posKey)) {
                 if ("SELL".equals(orderManager.getPositionSide(posKey))) {
                     boolean exited = exitHandler.checkShortExit(
-                            futSymbol, futToken, "NFO", posKey, price, 0, Signal.BUY);
-                    if (exited) clearPositionState(posKey, price);
+                            futSymbol, futToken, "NFO", posKey, futPrice, 0, sig);
+                    if (exited) clearPositionState(posKey, futPrice);
                 }
                 return;
             }
             double sl = MarketUtils.roundToTick(event.suggestedStopLoss(),
                     com.trading.strategy.InstrumentType.FUTURES);
             if (sl <= 0) sl = MarketUtils.roundToTick(
-                    riskManager.calculateStopLoss(price, calcAtr(item.token()), 1.5, sig),
+                    riskManager.calculateStopLoss(futPrice, calcAtr(item.token()), 1.5, sig),
                     com.trading.strategy.InstrumentType.FUTURES);
-            boolean opened = orderManager.buy(futSymbol, futToken, "NFO", posKey, qty, price);
+            boolean opened = orderManager.buy(futSymbol, futToken, "NFO", posKey, qty, futPrice,
+                    productTypeFor(stratName, InstrumentType.FUTURES));
             if (opened) {
                 double tp = MarketUtils.roundToTick(
-                        riskManager.calculateTakeProfit(price, sl, sig),
+                        riskManager.calculateTakeProfit(futPrice, sl, sig),
                         com.trading.strategy.InstrumentType.FUTURES);
                 takeProfits.put(posKey, tp);
                 positionTokens.put(posKey, futToken);
                 positionSymbols.put(posKey, futSymbol);
                 positionExchanges.put(posKey, "NFO");
-                riskManager.initTSL(posKey, price);
-                subscribeOptionToken(futToken);
+                riskManager.initTSL(posKey, futPrice);
                 saveOpenTrade(posKey, futSymbol, futToken, "NFO",
-                        stratName, "BUY", qty, price, sl, tp);
+                        stratName, "BUY", qty, futPrice, sl, tp);
                 log.info("Futures LONG | {} token={} qty={} @ Rs.{} sl=Rs.{} tp=Rs.{}",
-                        underlying, futToken, qty, price, sl, tp);
+                        underlying, futToken, qty, futPrice, sl, tp);
             }
 
-        } else if (sig == Signal.SELL) {
+        } else if (sig.isShortEntry()) {
             if (orderManager.hasOpenPosition(posKey)) {
                 if ("BUY".equals(orderManager.getPositionSide(posKey))) {
                     boolean exited = exitHandler.checkLongExit(
-                            futSymbol, futToken, "NFO", posKey, price, 0, Signal.SELL);
-                    if (exited) clearPositionState(posKey, price);
+                            futSymbol, futToken, "NFO", posKey, futPrice, 0, sig);
+                    if (exited) clearPositionState(posKey, futPrice);
                 }
                 return;
             }
             double sl = MarketUtils.roundToTick(event.suggestedStopLoss(),
                     com.trading.strategy.InstrumentType.FUTURES);
             if (sl <= 0) sl = MarketUtils.roundToTick(
-                    riskManager.calculateStopLoss(price, calcAtr(item.token()), 1.5, sig),
+                    riskManager.calculateStopLoss(futPrice, calcAtr(item.token()), 1.5, sig),
                     com.trading.strategy.InstrumentType.FUTURES);
-            boolean opened = orderManager.sellShort(futSymbol, futToken, "NFO", posKey, qty, price);
+            boolean opened = orderManager.sellShort(futSymbol, futToken, "NFO", posKey, qty, futPrice,
+                    productTypeFor(stratName, InstrumentType.FUTURES));
             if (opened) {
                 double tp = MarketUtils.roundToTick(
-                        riskManager.calculateTakeProfit(price, sl, sig),
+                        riskManager.calculateTakeProfit(futPrice, sl, sig),
                         com.trading.strategy.InstrumentType.FUTURES);
                 takeProfits.put(posKey, tp);
                 positionTokens.put(posKey, futToken);
                 positionSymbols.put(posKey, futSymbol);
                 positionExchanges.put(posKey, "NFO");
-                riskManager.initTSLShort(posKey, price);
-                subscribeOptionToken(futToken);
+                riskManager.initTSLShort(posKey, futPrice);
                 saveOpenTrade(posKey, futSymbol, futToken, "NFO",
-                        stratName, "SELL", qty, price, sl, tp);
+                        stratName, "SELL", qty, futPrice, sl, tp);
                 log.info("Futures SHORT | {} token={} qty={} @ Rs.{} sl=Rs.{} tp=Rs.{}",
-                        underlying, futToken, qty, price, sl, tp);
+                        underlying, futToken, qty, futPrice, sl, tp);
             }
         }
     }
@@ -565,6 +622,78 @@ public class TradingEngine {
     // ─────────────────────────────────────────────────────────────────
     // EOD SQUARE-OFF
     // ─────────────────────────────────────────────────────────────────
+
+    private double tradePriceForInstrument(String token, double fallbackPrice, String symbol) {
+        Double known = latestLtp.get(token);
+        if (known != null && known > 0) return known;
+
+        if (!paperMode) {
+            long deadline = System.currentTimeMillis() + 2500;
+            while (System.currentTimeMillis() < deadline) {
+                known = latestLtp.get(token);
+                if (known != null && known > 0) return known;
+                try {
+                    Thread.sleep(100);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            log.warn("No live LTP for {} token={} - skipping order to avoid using underlying price",
+                    symbol, token);
+            return 0;
+        }
+
+        return fallbackPrice;
+    }
+
+    private JSONObject buildRuntimeSnapshot() {
+        JSONArray candleState = new JSONArray();
+        for (WatchlistItem item : watchlist) {
+            List<Candle> candles = tickProcessor.getCandles(item.token());
+            Candle latest = candles.isEmpty() ? null : candles.get(candles.size() - 1);
+            candleState.put(new JSONObject()
+                    .put("token", item.token())
+                    .put("symbol", item.symbol())
+                    .put("lastLtp", latestLtp.getOrDefault(item.token(), 0.0))
+                    .put("candleCount", candles.size())
+                    .put("latestCandleTs", latest != null ? latest.getTs().toString() : JSONObject.NULL)
+                    .put("latestClose", latest != null ? latest.getClose() : 0.0)
+                    .put("latestVolume", latest != null ? latest.getVolume() : 0.0));
+        }
+
+        JSONArray auditState = new JSONArray();
+        signalEvaluator.lastAudits().values().stream()
+                .sorted((a, b) -> a.symbol().compareToIgnoreCase(b.symbol()))
+                .forEach(a -> auditState.put(new JSONObject()
+                        .put("token", a.token())
+                        .put("symbol", a.symbol())
+                        .put("strategy", a.strategyName())
+                        .put("candleTs", a.candleTs() != null ? a.candleTs().toString() : JSONObject.NULL)
+                        .put("signal", a.signal())
+                        .put("reason", a.reason())
+                        .put("rsi", a.rsi())
+                        .put("vwap", a.vwap())
+                        .put("supertrend", a.supertrend())
+                        .put("adx", a.adx())
+                        .put("volumeRatio", a.volumeRatio())
+                        .put("bullScore", a.bullScore())
+                        .put("bearScore", a.bearScore())));
+
+        JSONArray positions = new JSONArray();
+        orderManager.getOpenPositions().forEach((key, pos) -> positions.put(new JSONObject()
+                .put("key", key)
+                .put("symbol", pos.symbol())
+                .put("side", pos.side())
+                .put("qty", pos.qty())
+                .put("entryPrice", pos.entryPrice())
+                .put("ltp", latestLtp.getOrDefault(positionTokens.getOrDefault(key, key), 0.0))));
+
+        return new JSONObject()
+                .put("candles", candleState)
+                .put("lastSignals", auditState)
+                .put("positions", positions);
+    }
 
     private void closeAllPositions() {
         log.warn("closeAllPositions triggered via Telegram /closeall");
@@ -574,7 +703,7 @@ public class TradingEngine {
             String exitExchange = positionExchanges.getOrDefault(posKey, "NSE");
             double exitPrice    = latestLtp.getOrDefault(exitToken, 0.0);
             if (exitPrice <= 0) { log.warn("closeAll: no LTP for {} — skipping", posKey); return; }
-            boolean exited = exitHandler.forceExit(exitSymbol, exitToken, exitExchange, posKey, exitPrice);
+            boolean exited = exitHandler.forceExit(exitSymbol, exitToken, exitExchange, posKey, exitPrice, "MANUAL_EXIT");
             if (exited) clearPositionState(posKey, exitPrice);
         });
         TelegramAlert.sendAsync("All positions closed via /closeall.");
@@ -583,13 +712,45 @@ public class TradingEngine {
     private void forceSquareOff(String underlyingToken, String symbol, String exchange, double underlyingPrice) {
         new ArrayList<>(orderManager.getOpenPositions().keySet()).forEach(posKey -> {
             if (!posKey.startsWith(underlyingToken + "|")) return;
+            if (!isIntradayPosition(posKey)) {
+                log.debug("Skipping delivery position at square-off | {}", posKey);
+                return;
+            }
             String exitToken    = positionTokens.getOrDefault(posKey, underlyingToken);
             String exitSymbol   = positionSymbols.getOrDefault(posKey, symbol);
             String exitExchange = positionExchanges.getOrDefault(posKey, exchange);
             double exitPrice    = latestLtp.getOrDefault(exitToken, underlyingPrice);
-            boolean exited = exitHandler.forceExit(exitSymbol, exitToken, exitExchange, posKey, exitPrice);
+            boolean exited = exitHandler.forceExit(exitSymbol, exitToken, exitExchange, posKey, exitPrice, "INTRADAY_EXIT");
             if (exited) clearPositionState(posKey, exitPrice);
         });
+    }
+
+    private boolean isIntradayPosition(String posKey) {
+        String[] parts = posKey.split("\\|");
+        if (parts.length < 2) return true;
+        return HoldingType.fromStrategyName(parts[1]).isIntraday();
+    }
+
+    private String productTypeFor(String strategyName, InstrumentType instrumentType) {
+        HoldingType holdingType = HoldingType.fromStrategyName(strategyName);
+        if (holdingType.isIntraday()) {
+            return AppConfig.get("order.product.type.intraday", "INTRADAY");
+        }
+
+        if (instrumentType == InstrumentType.EQUITY) {
+            return AppConfig.get("order.product.type.delivery.equity", "DELIVERY");
+        }
+
+        String legacyFallback = AppConfig.get("order.product.type", "CARRYFORWARD");
+        return AppConfig.get("order.product.type.delivery.derivatives", legacyFallback);
+    }
+
+    private String productTypeForStrategyName(String strategyName) {
+        Strategy strategy = strategyMap.get(strategyName);
+        InstrumentType instrumentType = strategy != null
+                ? strategy.getInstrumentConfig().type()
+                : InstrumentType.EQUITY;
+        return productTypeFor(strategyName, instrumentType);
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -604,7 +765,7 @@ public class TradingEngine {
         String exitExch   = positionExchanges.getOrDefault(posKey, "NFO");
         double exitPrice  = latestLtp.getOrDefault(exitToken, fallbackPrice);
         boolean closed = orderManager.closePosition(exitSymbol, exitToken, exitExch, posKey, exitPrice);
-        if (closed) clearPositionState(posKey, exitPrice);
+        if (closed) clearPositionState(posKey, exitPrice, "SIGNAL");
     }
 
     /** Persists a new open trade to DB and registers it in openTradeRecords. */
@@ -630,6 +791,10 @@ public class TradingEngine {
 
     /** Persists the trade close to DB and removes all per-position state. */
     private void clearPositionState(String posKey, double exitPrice) {
+        clearPositionState(posKey, exitPrice, exitHandler.consumeLastExitReason(posKey, "UNKNOWN"));
+    }
+
+    private void clearPositionState(String posKey, double exitPrice, String exitReason) {
         ExecutedTrade trade = openTradeRecords.remove(posKey);
         if (trade != null) {
             double pnl = "BUY".equals(trade.getSide())
@@ -639,6 +804,7 @@ public class TradingEngine {
             trade.setExitTime(LocalDateTime.now(MarketUtils.IST));
             trade.setPnl(pnl);
             trade.setStatus("CLOSED");
+            trade.setExitReason(exitReason);
             tradeRepo.close(trade);
         }
         takeProfits.remove(posKey);
@@ -694,7 +860,8 @@ public class TradingEngine {
             String posKey = (t.getPosKey() != null && !t.getPosKey().isBlank())
                     ? t.getPosKey()
                     : t.getToken() + "|" + t.getStrategyName(); // legacy fallback for old DB rows
-            orderManager.restorePosition(posKey, t.getEntryPrice(), t.getQuantity(), t.getSide(), t.getSymbol());
+            orderManager.restorePosition(posKey, t.getEntryPrice(), t.getQuantity(), t.getSide(),
+                    t.getSymbol(), productTypeForStrategyName(t.getStrategyName()));
             riskManager.restoreOpenTrade(posKey, t.getEntryPrice(), t.getQuantity());
 
             // Restore position state maps
@@ -816,7 +983,9 @@ public class TradingEngine {
                 AppConfig.getDouble("strategy.vsrsi.rsi.bear.high",   60),
                 java.time.LocalTime.parse(AppConfig.get("strategy.vsrsi.entry.start",  "09:30")),
                 java.time.LocalTime.parse(AppConfig.get("strategy.vsrsi.entry.cutoff", "14:30")),
-                vsrsiInstr));
+                vsrsiInstr,
+                VwapSupertrendRsiStrategy.SupertrendMode.parse(
+                        AppConfig.get("strategy.vsrsi.supertrend.mode", "LEGACY"))));
 
         // ── MICS — always OPTION_BUY ──────────────────────────────────
         InstrumentConfig micsOptionInstr = InstrumentConfig.optionBuy(

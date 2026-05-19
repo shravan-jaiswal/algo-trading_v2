@@ -52,8 +52,8 @@ public class RSIStrategy implements Strategy {
         boolean buySignal  = rsiPrev <= oversold  && rsiNow > oversold;
         boolean sellSignal = rsiPrev >= overbought && rsiNow < overbought;
 
-        if (buySignal)  { log.debug("RSI BUY  | rsi:{}", rsiNow); return Signal.BUY; }
-        if (sellSignal) { log.debug("RSI SELL | rsi:{}", rsiNow); return Signal.SELL; }
+        if (buySignal)  { log.debug("RSI LONG  | rsi:{}", rsiNow); return Signal.LONG; }
+        if (sellSignal) { log.debug("RSI SHORT | rsi:{}", rsiNow); return Signal.SHORT; }
         return Signal.NONE;
     }
 

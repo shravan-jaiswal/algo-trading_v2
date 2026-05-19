@@ -18,8 +18,13 @@ public record SignalEvent(
         return signal != Signal.NONE && currentPrice > 0;
     }
 
-    public boolean isBuy()  { return signal == Signal.BUY; }
-    public boolean isSell() { return signal == Signal.SELL; }
+    public boolean isLong()      { return signal.isLongEntry(); }
+    public boolean isShort()     { return signal.isShortEntry(); }
+    public boolean isLongExit()  { return signal == Signal.LONG_EXIT; }
+    public boolean isShortExit() { return signal == Signal.SHORT_EXIT; }
+
+    @Deprecated public boolean isBuy()  { return isLong(); }
+    @Deprecated public boolean isSell() { return isShort(); }
 
     @Override
     public String toString() {

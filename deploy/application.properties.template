@@ -30,7 +30,27 @@ trading.option.buy.max.loss=3000
 trading.option.write.max.profit=6000
 trading.option.write.max.loss=3000
 
+# Broker product types used by live orders.
+# INTRADAY holdings use the intraday value and are square-off eligible.
+# DELIVERY holdings use equity/derivative delivery values and are not auto squared off by the engine.
+order.product.type.intraday=INTRADAY
+order.product.type.delivery.equity=DELIVERY
+order.product.type.delivery.derivatives=NRML
+
 # ─── Database ─────────────────────────────────────────────
+# VSRSI strategy
+# LEGACY restores the earlier loose Supertrend proxy used by VSRSI.
+# REAL uses the corrected trailing Supertrend calculation for testing/retuning.
+strategy.vsrsi.trade.type=BOTH
+strategy.vsrsi.holding.type=INTRADAY
+strategy.vsrsi.supertrend.mode=LEGACY
+strategy.mics.trade.type=BOTH
+strategy.mics.holding.type=INTRADAY
+strategy.ma.trade.type=BOTH
+strategy.ma.holding.type=INTRADAY
+strategy.rsi.trade.type=BOTH
+strategy.rsi.holding.type=INTRADAY
+
 db.url=jdbc:postgresql://localhost:5432/algo_db_v2
 db.username=algo
 db.password=CHANGE_ME_DB_PASSWORD

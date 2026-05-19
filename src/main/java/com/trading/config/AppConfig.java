@@ -25,7 +25,8 @@ public final class AppConfig {
         //    This allows VPS deployments to keep credentials outside the JAR.
         String[] externalPaths = {
             "config/application.properties",
-            "application.properties"
+            "application.properties",
+            "/opt/algo-trading_v2/application.properties"
         };
         for (String path : externalPaths) {
             java.io.File f = new java.io.File(path);

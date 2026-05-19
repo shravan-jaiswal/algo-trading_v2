@@ -131,7 +131,7 @@ public class RiskManager {
 
     public double calculateStopLoss(double entryPrice, double atr,
                                     double multiplier, Signal signal) {
-        return signal == Signal.BUY
+        return signal.isLongEntry()
             ? entryPrice - atr * multiplier
             : entryPrice + atr * multiplier;
     }
@@ -140,7 +140,7 @@ public class RiskManager {
         if (cfg.riskRewardRatio() <= 0) return 0;
         double risk   = Math.abs(entryPrice - stopLoss);
         double reward = risk * cfg.riskRewardRatio();
-        return signal == Signal.BUY
+        return signal.isLongEntry()
             ? entryPrice + reward
             : entryPrice - reward;
     }

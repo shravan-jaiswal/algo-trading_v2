@@ -164,6 +164,7 @@ public class TickProcessor {
     }
 
     private void persistCandle(Candle candle) {
+        if (candleRepo == null) return;
         try {
             candleRepo.upsert(candle);
             log.debug("Candle saved | {} {} O:{} H:{} L:{} C:{} V:{}",

@@ -59,11 +59,11 @@ public class MACrossoverStrategy implements Strategy {
 
         if (bullCross) {
             log.debug("MA BULL cross | fast:{} > slow:{}", fastNow, slowNow);
-            return Signal.BUY;
+            return Signal.LONG;
         }
         if (bearCross) {
             log.debug("MA BEAR cross | fast:{} < slow:{}", fastNow, slowNow);
-            return Signal.SELL;
+            return Signal.SHORT;
         }
         return Signal.NONE;
     }

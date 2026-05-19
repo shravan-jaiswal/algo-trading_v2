@@ -52,6 +52,26 @@ public final class SupertrendIndicator {
         return new Result(supertrend, bullish);
     }
 
+    /**
+     * Legacy VSRSI behavior: uses current ATR bands for stop placement and a
+     * simple candle-direction proxy for trend. This keeps the loose, non-trailing
+     * band behavior while allowing both bullish and bearish signals.
+     */
+    public static Result calculateLegacy(List<Candle> candles, int atrPeriod, double multiplier) {
+        if (candles.size() < atrPeriod + 2) return null;
+
+        double[] atr = atr(candles, atrPeriod);
+        double latestAtr = atr[candles.size() - 1];
+        if (latestAtr <= 0) return null;
+
+        Candle latest = candles.get(candles.size() - 1);
+        double hl2 = (latest.getHigh() + latest.getLow()) / 2.0;
+        double upperBand = hl2 + multiplier * latestAtr;
+        double lowerBand = hl2 - multiplier * latestAtr;
+        boolean bullish = latest.isBullish() || (!latest.isBearish() && latest.getClose() >= hl2);
+        return new Result(bullish ? lowerBand : upperBand, bullish);
+    }
+
     private static double[] atr(List<Candle> candles, int period) {
         double[] atr = new double[candles.size()];
         double sumTr = 0;

@@ -12,7 +12,11 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * Lightweight HTTP health + status endpoint.
@@ -25,11 +29,18 @@ public class TradingDashboard {
 
     private final RiskManager  riskManager;
     private final OrderManager orderManager;
+    private final Supplier<JSONObject> runtimeSnapshotSupplier;
     private       HttpServer   server;
 
     public TradingDashboard(RiskManager riskManager, OrderManager orderManager) {
+        this(riskManager, orderManager, null);
+    }
+
+    public TradingDashboard(RiskManager riskManager, OrderManager orderManager,
+                            Supplier<JSONObject> runtimeSnapshotSupplier) {
         this.riskManager  = riskManager;
         this.orderManager = orderManager;
+        this.runtimeSnapshotSupplier = runtimeSnapshotSupplier;
     }
 
     public void start() {
@@ -38,6 +49,7 @@ public class TradingDashboard {
             server = HttpServer.create(new InetSocketAddress(port), 0);
             server.createContext("/health", this::handleRequest);
             server.createContext("/status", this::handleRequest);
+            server.createContext("/replay/today", this::handleReplayToday);
             server.setExecutor(java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor());
             server.start();
             log.info("TradingDashboard started on port {}", port);
@@ -52,16 +64,51 @@ public class TradingDashboard {
 
     private void handleRequest(com.sun.net.httpserver.HttpExchange ex) throws IOException {
         JSONObject json = buildSnapshot();
+        writeJson(ex, 200, json);
+    }
+
+    private void handleReplayToday(com.sun.net.httpserver.HttpExchange ex) throws IOException {
+        try {
+            Map<String, String> query = parseQuery(ex.getRequestURI().getRawQuery());
+            String strategy = query.getOrDefault("strategy", "MICS");
+            String timeframe = query.getOrDefault("timeframe", "FIVE_MINUTE");
+            String token = query.get("token");
+            JSONObject json = TodayReplayRunner.replay(timeframe, strategy, token);
+            writeJson(ex, 200, json);
+        } catch (Exception e) {
+            writeJson(ex, 500, new JSONObject()
+                    .put("error", "replay_failed")
+                    .put("message", e.getMessage()));
+        }
+    }
+
+    private void writeJson(com.sun.net.httpserver.HttpExchange ex, int status, JSONObject json)
+            throws IOException {
         byte[] body = json.toString(2).getBytes(StandardCharsets.UTF_8);
         ex.getResponseHeaders().set("Content-Type", "application/json");
-        ex.sendResponseHeaders(200, body.length);
+        ex.sendResponseHeaders(status, body.length);
         try (OutputStream os = ex.getResponseBody()) {
             os.write(body);
         }
     }
 
+    private Map<String, String> parseQuery(String rawQuery) {
+        Map<String, String> query = new HashMap<>();
+        if (rawQuery == null || rawQuery.isBlank()) return query;
+        for (String pair : rawQuery.split("&")) {
+            if (pair.isBlank()) continue;
+            String[] parts = pair.split("=", 2);
+            String key = URLDecoder.decode(parts[0], StandardCharsets.UTF_8);
+            String value = parts.length > 1
+                    ? URLDecoder.decode(parts[1], StandardCharsets.UTF_8)
+                    : "";
+            query.put(key, value);
+        }
+        return query;
+    }
+
     private JSONObject buildSnapshot() {
-        return new JSONObject()
+        JSONObject json = new JSONObject()
             .put("halted",           riskManager.isHalted())
             .put("openPositions",    riskManager.getOpenPositions())
             .put("tradesToday",      riskManager.getTradesToday())
@@ -70,5 +117,9 @@ public class TradingDashboard {
             .put("netPnl",           riskManager.getDailyProfit() - riskManager.getDailyLoss())
             .put("deployedCapital",  riskManager.getDeployedCapital())
             .put("availableCapital", riskManager.getAvailableCapital());
+        if (runtimeSnapshotSupplier != null) {
+            json.put("runtime", runtimeSnapshotSupplier.get());
+        }
+        return json;
     }
 }

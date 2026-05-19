@@ -20,6 +20,7 @@ public class ExecutedTrade {
     private LocalDateTime exitTime;
     private double        exitPrice;
     private double        pnl;
+    private String        exitReason;
 
     public ExecutedTrade() {}
 
@@ -71,6 +72,9 @@ public class ExecutedTrade {
 
     public double        getPnl()          { return pnl; }
     public void          setPnl(double v)  { this.pnl = v; }
+
+    public String        getExitReason()   { return exitReason; }
+    public void          setExitReason(String v) { this.exitReason = v; }
 
     public boolean isOpen() { return "OPEN".equalsIgnoreCase(status); }
 

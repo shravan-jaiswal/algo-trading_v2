@@ -6,6 +6,9 @@ import com.trading.utils.Shared;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
 /**
  * Checks exit conditions for open positions on every candle close.
  * Extracted from the main trading loop for single-responsibility.
@@ -21,6 +24,7 @@ public final class ExitHandler {
 
     private final RiskManager  riskManager;
     private final OrderManager orderManager;
+    private final Map<String, String> lastExitReasons = new ConcurrentHashMap<>();
 
     public ExitHandler(RiskManager riskManager, OrderManager orderManager) {
         this.riskManager  = riskManager;
@@ -41,8 +45,8 @@ public final class ExitHandler {
         if (!orderManager.hasOpenPosition(positionKey)) return false;
 
         // 1. Signal-based exit
-        if (latestSignal == Signal.SELL) {
-            log.info("Signal exit (SELL) | {} @ Rs.{}", symbol, Shared.fmt(currentPrice));
+        if (latestSignal.isLongExit()) {
+            log.info("Signal exit ({}) | {} @ Rs.{}", latestSignal, symbol, Shared.fmt(currentPrice));
             return doExit(symbol, token, exchange, positionKey, currentPrice, "SIGNAL");
         }
 
@@ -74,8 +78,8 @@ public final class ExitHandler {
 
         if (!orderManager.hasOpenPosition(positionKey)) return false;
 
-        if (latestSignal == Signal.BUY) {
-            log.info("Signal exit (BUY) on short | {} @ Rs.{}", symbol, Shared.fmt(currentPrice));
+        if (latestSignal.isShortExit()) {
+            log.info("Signal exit ({}) on short | {} @ Rs.{}", latestSignal, symbol, Shared.fmt(currentPrice));
             return doExit(symbol, token, exchange, positionKey, currentPrice, "SIGNAL");
         }
 
@@ -99,9 +103,19 @@ public final class ExitHandler {
 
     public boolean forceExit(String symbol, String token, String exchange,
                               String positionKey, double currentPrice) {
+        return forceExit(symbol, token, exchange, positionKey, currentPrice, "INTRADAY_EXIT");
+    }
+
+    public boolean forceExit(String symbol, String token, String exchange,
+                             String positionKey, double currentPrice, String reason) {
         if (!orderManager.hasOpenPosition(positionKey)) return false;
-        log.info("Force exit (EOD) | {} @ Rs.{}", symbol, Shared.fmt(currentPrice));
-        return doExit(symbol, token, exchange, positionKey, currentPrice, "EOD_SQUAREOFF");
+        log.info("Force exit ({}) | {} @ Rs.{}", reason, symbol, Shared.fmt(currentPrice));
+        return doExit(symbol, token, exchange, positionKey, currentPrice, reason);
+    }
+
+    public String consumeLastExitReason(String positionKey, String fallback) {
+        String reason = lastExitReasons.remove(positionKey);
+        return reason != null && !reason.isBlank() ? reason : fallback;
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -110,6 +124,7 @@ public final class ExitHandler {
                             String positionKey, double price, String reason) {
         boolean closed = orderManager.closePosition(symbol, token, exchange, positionKey, price);
         if (closed) {
+            lastExitReasons.put(positionKey, reason);
             log.info("Exit confirmed | {} reason={} @ Rs.{}", symbol, reason, Shared.fmt(price));
         }
         return closed;

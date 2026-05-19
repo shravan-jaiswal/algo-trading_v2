@@ -41,8 +41,8 @@ public class MultiIndicatorConfluenceStrategy implements Strategy {
     public Signal evaluate(List<Candle> candles) {
         lastSignal = engine.evaluate(candles);
         return switch (lastSignal) {
-            case StrategySignal.BullSignal   b -> Signal.BUY;
-            case StrategySignal.BearSignal   b -> Signal.SELL;
+            case StrategySignal.BullSignal   b -> Signal.LONG;
+            case StrategySignal.BearSignal   b -> Signal.SHORT;
             case StrategySignal.NeutralSignal n -> Signal.NONE;
         };
     }

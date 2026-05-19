@@ -52,7 +52,7 @@ public class ExecutedTradeRepository {
     public void close(ExecutedTrade trade) {
         String sql = """
             UPDATE executed_trades
-            SET status='CLOSED', exit_price=?, exit_time=?, pnl=?
+            SET status='CLOSED', exit_price=?, exit_time=?, pnl=?, exit_reason=?
             WHERE id=?
             """;
         try (Connection conn = db.getConnection();
@@ -60,7 +60,8 @@ public class ExecutedTradeRepository {
             ps.setDouble(1, trade.getExitPrice());
             ps.setTimestamp(2, Timestamp.valueOf(trade.getExitTime()));
             ps.setDouble(3, trade.getPnl());
-            ps.setInt(4, trade.getId());
+            ps.setString(4, trade.getExitReason());
+            ps.setInt(5, trade.getId());
             ps.executeUpdate();
         } catch (SQLException e) {
             log.error("Close trade failed: {}", e.getMessage());
@@ -96,7 +97,16 @@ public class ExecutedTradeRepository {
         t.setExchange(rs.getString("exchange"));
         Timestamp entryTs = rs.getTimestamp("entry_time");
         if (entryTs != null) t.setEntryTime(entryTs.toLocalDateTime());
+        t.setExitReason(readOptionalString(rs, "exit_reason"));
         return t;
+    }
+
+    private String readOptionalString(ResultSet rs, String column) {
+        try {
+            return rs.getString(column);
+        } catch (SQLException ignored) {
+            return null;
+        }
     }
 
     private void ensureTable() {
@@ -117,14 +127,17 @@ public class ExecutedTradeRepository {
                 entry_time     TIMESTAMP,
                 exit_time      TIMESTAMP,
                 exit_price     DOUBLE PRECISION,
-                pnl            DOUBLE PRECISION
+                pnl            DOUBLE PRECISION,
+                exit_reason    VARCHAR(50)
             )
             """;
         String alter = "ALTER TABLE executed_trades ADD COLUMN IF NOT EXISTS pos_key VARCHAR(100)";
+        String alterExitReason = "ALTER TABLE executed_trades ADD COLUMN IF NOT EXISTS exit_reason VARCHAR(50)";
         try (Connection conn = db.getConnection();
              Statement st = conn.createStatement()) {
             st.execute(create);
             st.execute(alter);
+            st.execute(alterExitReason);
         } catch (SQLException e) {
             log.error("Create executed_trades table failed: {}", e.getMessage());
         }

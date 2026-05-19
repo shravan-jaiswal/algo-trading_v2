@@ -6,7 +6,20 @@ import java.util.List;
 
 public interface Strategy {
 
-    enum Signal { BUY, SELL, NONE }
+    enum Signal {
+        LONG,
+        LONG_EXIT,
+        SHORT,
+        SHORT_EXIT,
+        NONE;
+
+        public boolean isLongEntry()  { return this == LONG; }
+        public boolean isShortEntry() { return this == SHORT; }
+        public boolean isLongExit()   { return this == LONG_EXIT || this == SHORT; }
+        public boolean isShortExit()  { return this == SHORT_EXIT || this == LONG; }
+        public boolean isEntry()      { return this == LONG || this == SHORT; }
+        public boolean isExitOnly()   { return this == LONG_EXIT || this == SHORT_EXIT; }
+    }
 
     record StrategyContext(String symbol, String token, List<Candle> candles) {
         public StrategyContext {
