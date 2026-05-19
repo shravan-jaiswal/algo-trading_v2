@@ -17,22 +17,69 @@ public final class SupertrendIndicator {
     public static Result calculate(List<Candle> candles, int atrPeriod, double multiplier) {
         if (candles.size() < atrPeriod + 2) return null;
 
-        // Compute ATR using BarSeriesCache
-        double atr = BarSeriesCache.of(candles).atr(atrPeriod);
-        if (atr <= 0) return null;
+        double[] atr = atr(candles, atrPeriod);
+        int start = firstValidAtrIndex(atr);
+        if (start < 0) return null;
 
-        Candle latest = candles.get(candles.size() - 1);
-        double hl2    = (latest.getHigh() + latest.getLow()) / 2.0;
+        Candle startBar = candles.get(start);
+        double hl2 = (startBar.getHigh() + startBar.getLow()) / 2.0;
+        double finalUpper = hl2 + multiplier * atr[start];
+        double finalLower = hl2 - multiplier * atr[start];
+        boolean bullish = startBar.getClose() >= finalLower;
+        double supertrend = bullish ? finalLower : finalUpper;
 
-        double upperBand = hl2 + multiplier * atr;
-        double lowerBand = hl2 - multiplier * atr;
+        for (int i = start + 1; i < candles.size(); i++) {
+            Candle bar = candles.get(i);
+            Candle prev = candles.get(i - 1);
 
-        // Simplified: use close vs bands as direction proxy
-        double close = latest.getClose();
-        boolean bullish = close > lowerBand;
+            hl2 = (bar.getHigh() + bar.getLow()) / 2.0;
+            double basicUpper = hl2 + multiplier * atr[i];
+            double basicLower = hl2 - multiplier * atr[i];
 
-        double stopLine = bullish ? lowerBand : upperBand;
+            finalUpper = (basicUpper < finalUpper || prev.getClose() > finalUpper)
+                    ? basicUpper : finalUpper;
+            finalLower = (basicLower > finalLower || prev.getClose() < finalLower)
+                    ? basicLower : finalLower;
 
-        return new Result(stopLine, bullish);
+            if (bullish) {
+                bullish = bar.getClose() >= finalLower;
+            } else {
+                bullish = bar.getClose() > finalUpper;
+            }
+            supertrend = bullish ? finalLower : finalUpper;
+        }
+
+        return new Result(supertrend, bullish);
+    }
+
+    private static double[] atr(List<Candle> candles, int period) {
+        double[] atr = new double[candles.size()];
+        double sumTr = 0;
+
+        for (int i = 1; i < candles.size(); i++) {
+            double tr = trueRange(candles.get(i), candles.get(i - 1));
+            if (i <= period) {
+                sumTr += tr;
+                if (i == period) atr[i] = sumTr / period;
+            } else {
+                atr[i] = (atr[i - 1] * (period - 1) + tr) / period;
+            }
+        }
+
+        return atr;
+    }
+
+    private static double trueRange(Candle bar, Candle prev) {
+        double highLow = bar.getHigh() - bar.getLow();
+        double highClose = Math.abs(bar.getHigh() - prev.getClose());
+        double lowClose = Math.abs(bar.getLow() - prev.getClose());
+        return Math.max(highLow, Math.max(highClose, lowClose));
+    }
+
+    private static int firstValidAtrIndex(double[] atr) {
+        for (int i = 0; i < atr.length; i++) {
+            if (atr[i] > 0) return i;
+        }
+        return -1;
     }
 }

@@ -4,7 +4,9 @@ import com.trading.model.Candle;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 public final class TimeframeAggregator {
 
@@ -29,10 +31,15 @@ public final class TimeframeAggregator {
         if (source == null || source.isEmpty()) return List.of();
 
         List<Candle> result = new ArrayList<>(source.size() / factor + 1);
-        int i = 0;
-        while (i < source.size()) {
-            int end = Math.min(i + factor, source.size());
-            List<Candle> bucket = source.subList(i, end);
+        Map<LocalDateTime, List<Candle>> buckets = new LinkedHashMap<>();
+        for (Candle candle : source) {
+            LocalDateTime alignedTs = alignTimestamp(candle.getTs(), timeframe);
+            buckets.computeIfAbsent(alignedTs, k -> new ArrayList<>()).add(candle);
+        }
+
+        for (Map.Entry<LocalDateTime, List<Candle>> entry : buckets.entrySet()) {
+            List<Candle> bucket = entry.getValue();
+            if (bucket.isEmpty()) continue;
 
             Candle first = bucket.get(0);
             double open  = first.getOpen();
@@ -41,18 +48,14 @@ public final class TimeframeAggregator {
             double close = bucket.get(bucket.size() - 1).getClose();
             double vol   = bucket.stream().mapToDouble(Candle::getVolume).sum();
 
-            // Align timestamp to start of the aggregated bar
-            LocalDateTime alignedTs = alignTimestamp(first.getTs(), factor, timeframe);
-
-            result.add(new Candle(first.getToken(), timeframe, alignedTs,
+            result.add(new Candle(first.getToken(), timeframe, entry.getKey(),
                     open, high, low, close, vol));
-            i += factor;
         }
 
         return result;
     }
 
-    private static LocalDateTime alignTimestamp(LocalDateTime ts, int factor, String tf) {
+    private static LocalDateTime alignTimestamp(LocalDateTime ts, String tf) {
         return switch (tf) {
             case "FIFTEEN_MINUTE" -> {
                 int min = ts.getMinute();

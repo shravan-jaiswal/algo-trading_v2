@@ -26,7 +26,7 @@ public class CandleRepository {
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (token, timeframe, ts) DO UPDATE
             SET high=EXCLUDED.high, low=EXCLUDED.low,
-                close=EXCLUDED.close, volume=EXCLUDED.volume
+                close=EXCLUDED.close, volume=COALESCE(EXCLUDED.volume, 0)
             """;
         try (Connection conn = db.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -37,7 +37,7 @@ public class CandleRepository {
             ps.setDouble(5, c.getHigh());
             ps.setDouble(6, c.getLow());
             ps.setDouble(7, c.getClose());
-            ps.setDouble(8, c.getVolume());
+            ps.setDouble(8, Math.max(c.getVolume(), 0));
             ps.executeUpdate();
         } catch (SQLException e) {
             log.error("Candle upsert failed: {}", e.getMessage());
@@ -127,6 +127,9 @@ public class CandleRepository {
         try (Connection conn = db.getConnection();
              Statement st = conn.createStatement()) {
             st.execute(sql);
+            st.execute("UPDATE candles SET volume = 0 WHERE volume IS NULL");
+            st.execute("ALTER TABLE candles ALTER COLUMN volume SET DEFAULT 0");
+            st.execute("ALTER TABLE candles ALTER COLUMN volume SET NOT NULL");
         } catch (SQLException e) {
             log.error("Create candles table failed: {}", e.getMessage());
         }

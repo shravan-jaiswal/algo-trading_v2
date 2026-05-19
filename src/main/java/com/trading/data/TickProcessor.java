@@ -57,6 +57,7 @@ public class TickProcessor {
             // First tick for this token
             live = newCandle(token, barStart, ltp, tick.volume());
             liveCandles.put(token, live);
+            persistCandle(live);
             return null;
         }
 
@@ -71,6 +72,7 @@ public class TickProcessor {
             // Open new bar
             live = newCandle(token, barStart, ltp, tick.volume());
             liveCandles.put(token, live);
+            persistCandle(live);
             return closed;
         }
 
@@ -89,19 +91,33 @@ public class TickProcessor {
      * tick of the next bar arrives (can be minutes on slow-tick symbols).
      * Call this once per minute from a scheduler.
      */
-    public synchronized void flushCompleted() {
+    public synchronized List<Candle> flushCompleted() {
         LocalDateTime now         = LocalDateTime.now(MarketUtils.IST);
         LocalDateTime currentSlot = truncate(now, barMinutes);
+        List<Candle> closedCandles = new ArrayList<>();
 
         liveCandles.forEach((token, candle) -> {
             if (candle != null && truncate(candle.getTs(), barMinutes).isBefore(currentSlot)) {
                 persistCandle(candle);
                 getBuffer(token).add(candle);
+                closedCandles.add(candle);
                 liveCandles.put(token, null);   // mark as flushed; cleared on next tick
             }
         });
         // Remove null sentinels left by flush
         liveCandles.entrySet().removeIf(e -> e.getValue() == null);
+        return closedCandles;
+    }
+
+    /**
+     * Upserts currently forming candles without closing them.
+     * This keeps the database current during a bar: at 14:23 the 14:20 candle
+     * row exists and is updated until the bar closes.
+     */
+    public synchronized void persistLiveSnapshots() {
+        liveCandles.forEach((token, candle) -> {
+            if (candle != null) persistCandle(candle);
+        });
     }
 
     /**
@@ -161,12 +177,13 @@ public class TickProcessor {
     }
 
     private Candle newCandle(String token, LocalDateTime barStart, double price, double volume) {
+        double safeVolume = Math.max(volume, 0);
         return switch (barMinutes) {
-            case 1  -> new Candle(token, "ONE_MINUTE",     barStart, price, price, price, price, volume);
-            case 3  -> new Candle(token, "THREE_MINUTE",   barStart, price, price, price, price, volume);
-            case 5  -> new Candle(token, "FIVE_MINUTE",    barStart, price, price, price, price, volume);
-            case 15 -> new Candle(token, "FIFTEEN_MINUTE", barStart, price, price, price, price, volume);
-            default -> new Candle(token, barMinutes + "_MINUTE", barStart, price, price, price, price, volume);
+            case 1  -> new Candle(token, "ONE_MINUTE",     barStart, price, price, price, price, safeVolume);
+            case 3  -> new Candle(token, "THREE_MINUTE",   barStart, price, price, price, price, safeVolume);
+            case 5  -> new Candle(token, "FIVE_MINUTE",    barStart, price, price, price, price, safeVolume);
+            case 15 -> new Candle(token, "FIFTEEN_MINUTE", barStart, price, price, price, price, safeVolume);
+            default -> new Candle(token, barMinutes + "_MINUTE", barStart, price, price, price, price, safeVolume);
         };
     }
 

@@ -168,12 +168,19 @@ public class TradingEngine {
         feed.subscribe(tokens, "NSE");
 
         tradeMonitor.start(15);
-        // Flush completed candles every minute so the current bar is saved to DB
-        // without waiting for the first tick of the next bar (important for slow-tick symbols)
+        // Flush completed candles every minute without waiting for the first tick
+        // of the next bar, then upsert live candles so the DB shows the current slot.
         java.util.concurrent.Executors.newSingleThreadScheduledExecutor(
                 r -> Thread.ofVirtual().unstarted(r))
             .scheduleAtFixedRate(() -> {
-                try { tickProcessor.flushCompleted(); } catch (Exception e) {
+                try {
+                    var closedCandles = tickProcessor.flushCompleted();
+                    for (Candle closed : closedCandles) {
+                        double price = latestLtp.getOrDefault(closed.getToken(), closed.getClose());
+                        onCandleClose(closed.getToken(), price);
+                    }
+                    tickProcessor.persistLiveSnapshots();
+                } catch (Exception e) {
                     log.warn("flushCompleted error: {}", e.getMessage());
                 }
             }, 60, 60, java.util.concurrent.TimeUnit.SECONDS);
