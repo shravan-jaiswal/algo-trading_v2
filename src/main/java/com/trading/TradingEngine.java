@@ -168,6 +168,15 @@ public class TradingEngine {
         feed.subscribe(tokens, "NSE");
 
         tradeMonitor.start(15);
+        // Flush completed candles every minute so the current bar is saved to DB
+        // without waiting for the first tick of the next bar (important for slow-tick symbols)
+        java.util.concurrent.Executors.newSingleThreadScheduledExecutor(
+                r -> Thread.ofVirtual().unstarted(r))
+            .scheduleAtFixedRate(() -> {
+                try { tickProcessor.flushCompleted(); } catch (Exception e) {
+                    log.warn("flushCompleted error: {}", e.getMessage());
+                }
+            }, 60, 60, java.util.concurrent.TimeUnit.SECONDS);
         if (AppConfig.getBool("health.enabled", true)) dashboard.start();
 
         String botToken = AppConfig.get("telegram.bot.token", "");
@@ -715,6 +724,7 @@ public class TradingEngine {
             if (item != null) forceSquareOff(token, item.symbol(), item.exchange(), price);
         });
 
+        tickProcessor.flush();   // save the in-progress bar so it's not lost on restart
         tradeMonitor.stop();
         dashboard.stop();
         if (telegramListener != null) telegramListener.stop();

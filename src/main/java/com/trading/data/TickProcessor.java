@@ -2,6 +2,7 @@ package com.trading.data;
 
 import com.trading.model.Candle;
 import com.trading.model.Tick;
+import com.trading.utils.MarketUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -15,6 +16,13 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Converts real-time LTP ticks into OHLCV candles.
  * Maintains a live candle per token; closes it on the next bar boundary.
+ *
+ * Two save paths:
+ *   1. process() — triggered by a tick that crosses a bar boundary (normal path)
+ *   2. flushCompleted() — triggered by wall-clock time; saves any candle whose
+ *      time slot has fully elapsed without waiting for the next tick.
+ *      Call this once per minute from a scheduler so the last candle of
+ *      a slow-tick symbol is saved promptly.
  */
 public class TickProcessor {
 
@@ -36,9 +44,10 @@ public class TickProcessor {
 
     /** Call this for every incoming tick. Returns the completed candle if the bar just closed. */
     public synchronized Candle process(Tick tick) {
-        String        token = tick.token();
-        double        ltp   = tick.ltp();
-        LocalDateTime now   = tick.ts();
+        String        token    = tick.token();
+        double        ltp      = tick.ltp();
+        // Use exchange timestamp from tick (IST) — never LocalDateTime.now()
+        LocalDateTime now      = tick.ts();
 
         LocalDateTime barStart = truncate(now, barMinutes);
 
@@ -46,7 +55,7 @@ public class TickProcessor {
 
         if (live == null) {
             // First tick for this token
-            live = newCandle(token, barStart, ltp);
+            live = newCandle(token, barStart, ltp, tick.volume());
             liveCandles.put(token, live);
             return null;
         }
@@ -56,11 +65,11 @@ public class TickProcessor {
         if (!barStart.equals(liveBarStart)) {
             // Bar boundary crossed — persist the completed candle
             Candle closed = live;
-            candleRepo.upsert(closed);
+            persistCandle(closed);
             getBuffer(token).add(closed);
 
             // Open new bar
-            live = newCandle(token, barStart, ltp);
+            live = newCandle(token, barStart, ltp, tick.volume());
             liveCandles.put(token, live);
             return closed;
         }
@@ -69,8 +78,44 @@ public class TickProcessor {
         if (ltp > live.getHigh()) live.setHigh(ltp);
         if (ltp < live.getLow())  live.setLow(ltp);
         live.setClose(ltp);
-        live.setVolume(live.getVolume() + tick.volume());
+        // LTP mode sends 0 volume — ignore zeros so volume isn't diluted
+        if (tick.volume() > 0) live.setVolume(live.getVolume() + tick.volume());
         return null;
+    }
+
+    /**
+     * Saves any candle whose time slot has fully elapsed based on wall clock.
+     * Eliminates the race where a closed candle waits in memory until the first
+     * tick of the next bar arrives (can be minutes on slow-tick symbols).
+     * Call this once per minute from a scheduler.
+     */
+    public synchronized void flushCompleted() {
+        LocalDateTime now         = LocalDateTime.now(MarketUtils.IST);
+        LocalDateTime currentSlot = truncate(now, barMinutes);
+
+        liveCandles.forEach((token, candle) -> {
+            if (candle != null && truncate(candle.getTs(), barMinutes).isBefore(currentSlot)) {
+                persistCandle(candle);
+                getBuffer(token).add(candle);
+                liveCandles.put(token, null);   // mark as flushed; cleared on next tick
+            }
+        });
+        // Remove null sentinels left by flush
+        liveCandles.entrySet().removeIf(e -> e.getValue() == null);
+    }
+
+    /**
+     * Saves all open (partial) candles to DB — call on shutdown so the
+     * in-progress bar is not lost on restart.
+     */
+    public synchronized void flush() {
+        if (liveCandles.isEmpty()) return;
+        log.info("Flushing {} open candles to DB on shutdown...", liveCandles.size());
+        liveCandles.forEach((token, candle) -> {
+            if (candle != null) persistCandle(candle);
+        });
+        liveCandles.clear();
+        log.info("Flush complete.");
     }
 
     /** Returns the candle list for a token (completed + live bar appended). */
@@ -102,14 +147,26 @@ public class TickProcessor {
         return candleBuffer.computeIfAbsent(token, k -> new ArrayList<>());
     }
 
-    private Candle newCandle(String token, LocalDateTime barStart, double price) {
-        String tf = barMinutes + "_MINUTE";
+    private void persistCandle(Candle candle) {
+        try {
+            candleRepo.upsert(candle);
+            log.debug("Candle saved | {} {} O:{} H:{} L:{} C:{} V:{}",
+                    candle.getToken(), candle.getTs(),
+                    candle.getOpen(), candle.getHigh(),
+                    candle.getLow(),  candle.getClose(), candle.getVolume());
+        } catch (Exception e) {
+            log.error("Failed to save candle | token:{} time:{} — {}",
+                    candle.getToken(), candle.getTs(), e.getMessage());
+        }
+    }
+
+    private Candle newCandle(String token, LocalDateTime barStart, double price, double volume) {
         return switch (barMinutes) {
-            case 1  -> new Candle(token, "ONE_MINUTE",     barStart, price, price, price, price, 0);
-            case 3  -> new Candle(token, "THREE_MINUTE",   barStart, price, price, price, price, 0);
-            case 5  -> new Candle(token, "FIVE_MINUTE",    barStart, price, price, price, price, 0);
-            case 15 -> new Candle(token, "FIFTEEN_MINUTE", barStart, price, price, price, price, 0);
-            default -> new Candle(token, tf,               barStart, price, price, price, price, 0);
+            case 1  -> new Candle(token, "ONE_MINUTE",     barStart, price, price, price, price, volume);
+            case 3  -> new Candle(token, "THREE_MINUTE",   barStart, price, price, price, price, volume);
+            case 5  -> new Candle(token, "FIVE_MINUTE",    barStart, price, price, price, price, volume);
+            case 15 -> new Candle(token, "FIFTEEN_MINUTE", barStart, price, price, price, price, volume);
+            default -> new Candle(token, barMinutes + "_MINUTE", barStart, price, price, price, price, volume);
         };
     }
 
