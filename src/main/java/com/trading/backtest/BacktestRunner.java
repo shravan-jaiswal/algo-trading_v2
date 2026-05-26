@@ -7,6 +7,7 @@ import com.trading.model.Candle;
 import com.trading.model.WatchlistItem;
 import com.trading.risk.RiskConfig;
 import com.trading.strategy.HoldingType;
+import com.trading.strategy.InstrumentConfig;
 import com.trading.strategy.MACrossoverStrategy;
 import com.trading.strategy.Strategy;
 import com.trading.strategy.TradeType;
@@ -162,7 +163,7 @@ public class BacktestRunner {
 
     public static Strategy buildStrategy(String stratName) {
         return switch (stratName.toUpperCase()) {
-            case "MICS"  -> new MultiIndicatorConfluenceStrategy(MicsConfig.defaults(), null);
+            case "MICS"  -> new MultiIndicatorConfluenceStrategy(MicsConfig.fromAppConfig(), InstrumentConfig.EQUITY);
             case "MA"    -> new MACrossoverStrategy();
             case "VSRSI" -> new VwapSupertrendRsiStrategy();
             default      -> throw new IllegalArgumentException("Unknown strategy: " + stratName);

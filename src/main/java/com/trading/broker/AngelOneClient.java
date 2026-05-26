@@ -1,11 +1,14 @@
 package com.trading.broker;
 
 import com.angelbroking.smartapi.SmartConnect;
+import com.angelbroking.smartapi.http.exceptions.SmartAPIException;
 import com.angelbroking.smartapi.models.User;
 import com.trading.config.AppConfig;
 import dev.samstevens.totp.code.DefaultCodeGenerator;
 import dev.samstevens.totp.code.HashingAlgorithm;
 import dev.samstevens.totp.time.SystemTimeProvider;
+import org.json.JSONArray;
+import org.json.JSONObject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -84,6 +87,49 @@ public class AngelOneClient {
     public String       getAccessToken()  { return accessToken; }
     public String       getFeedToken()    { return feedToken; }
     public String       getClientId()     { return clientId; }
+
+    public double getLTP(String exchange, String symbol, String token) {
+        if (smartConnect == null) return -1;
+
+        try {
+            JSONObject params = new JSONObject();
+            params.put("mode", "LTP");
+            params.put("exchangeTokens", new JSONObject()
+                    .put(exchange, new JSONArray().put(token)));
+
+            JSONObject data = smartConnect.marketData(params);
+            if (data != null) {
+                JSONArray fetched = data.optJSONArray("fetched");
+                if (fetched != null && !fetched.isEmpty()) {
+                    double ltp = fetched.getJSONObject(0).optDouble("ltp", -1);
+                    if (ltp > 0) return ltp;
+                }
+                log.warn("getLTP(marketData) nothing fetched | exchange:{} symbol:{} token:{} | unfetched:{}",
+                        exchange, symbol, token, data.optJSONArray("unfetched"));
+            }
+        } catch (Exception e) {
+            log.warn("getLTP(marketData) failed | exchange:{} symbol:{} token:{} | {}",
+                    exchange, symbol, token, e.getMessage());
+        } catch (SmartAPIException e) {
+            log.warn("getLTP(marketData) SmartAPIException | exchange:{} symbol:{} token:{} | {}",
+                    exchange, symbol, token, e.getMessage());
+        }
+
+        try {
+            JSONObject resp = smartConnect.getLTP(exchange, symbol, token);
+            if (resp == null || !resp.optBoolean("status", false)) {
+                log.warn("getLTP(fallback) failed | exchange:{} symbol:{} token:{} | resp:{}",
+                        exchange, symbol, token, resp);
+                return -1;
+            }
+            JSONObject data = resp.optJSONObject("data");
+            return data == null ? -1 : data.optDouble("ltp", -1);
+        } catch (Exception e) {
+            log.warn("getLTP(fallback) exception | exchange:{} symbol:{} token:{} | {}",
+                    exchange, symbol, token, e.getMessage());
+            return -1;
+        }
+    }
 
     private String generateTotp() throws Exception {
         var generator = new DefaultCodeGenerator(HashingAlgorithm.SHA1, 6);

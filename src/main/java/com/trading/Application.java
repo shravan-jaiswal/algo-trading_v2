@@ -5,6 +5,8 @@ import com.beust.jcommander.Parameter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.concurrent.CountDownLatch;
+
 /**
  * Entry point — keeps wiring minimal; all logic lives in TradingEngine.
  *
@@ -79,6 +81,11 @@ public class Application {
         TradingEngine engine = new TradingEngine();
         try {
             engine.start();
+            new CountDownLatch(1).await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.info("Application interrupted; shutting down.");
+            engine.shutdown();
         } catch (Exception e) {
             log.error("Fatal error during startup: {}", e.getMessage(), e);
             engine.shutdown();

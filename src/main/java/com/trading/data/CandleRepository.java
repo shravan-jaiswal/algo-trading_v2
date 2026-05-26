@@ -92,6 +92,32 @@ public class CandleRepository {
         return result;
     }
 
+    public List<Candle> findRecentBefore(String token, String timeframe,
+                                         LocalDateTime before, int limit) {
+        String sql = """
+            SELECT token, timeframe, ts, open, high, low, close, volume
+            FROM candles
+            WHERE token=? AND timeframe=? AND ts < ?
+            ORDER BY ts DESC LIMIT ?
+            """;
+        List<Candle> result = new ArrayList<>();
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, token);
+            ps.setString(2, timeframe);
+            ps.setTimestamp(3, Timestamp.valueOf(before));
+            ps.setInt(4, limit);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    result.add(0, mapRow(rs));
+                }
+            }
+        } catch (SQLException e) {
+            log.error("findRecentBefore failed for {}: {}", token, e.getMessage());
+        }
+        return result;
+    }
+
     /** Strips null bytes that the broker WebSocket occasionally embeds in token strings. */
     private static String sanitize(String s) {
         return s == null ? null : s.replaceAll("\\u0000", "");

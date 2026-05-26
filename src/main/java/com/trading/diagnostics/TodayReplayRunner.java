@@ -20,6 +20,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public final class TodayReplayRunner {
@@ -65,7 +66,6 @@ public final class TodayReplayRunner {
             LocalDate today = LocalDate.now(MarketUtils.IST);
             LocalDateTime from = today.atStartOfDay();
             LocalDateTime to = LocalDateTime.now(MarketUtils.IST);
-
             JSONArray symbolResults = new JSONArray();
             int totalSignals = 0;
 
@@ -73,17 +73,32 @@ public final class TodayReplayRunner {
                 if (tokenFilter != null && !tokenFilter.equals(item.token())) continue;
                 if (!item.hasStrategy(strategyName)) continue;
 
-                List<Candle> candles = candleRepo.findBetween(item.token(), timeframe, from, to);
-                if (candles.isEmpty()) {
+                Strategy strategy = BacktestRunner.buildStrategy(strategyName);
+                List<Candle> warmupCandles = candleRepo.findRecentBefore(
+                                item.token(), timeframe, from, strategy.getMinCandles())
+                        .stream()
+                        .filter(c -> MarketUtils.isRegularMarketSession(c.getTs()))
+                        .toList();
+                List<Candle> todayCandles = candleRepo.findBetween(item.token(), timeframe, from, to)
+                        .stream()
+                        .filter(c -> MarketUtils.isRegularMarketSession(c.getTs()))
+                        .toList();
+                List<Candle> allCandles = new java.util.ArrayList<>(warmupCandles.size() + todayCandles.size());
+                allCandles.addAll(warmupCandles);
+                allCandles.addAll(todayCandles);
+
+                if (todayCandles.isEmpty()) {
                     log.warn("Replay | {} | no candles today", item.symbol());
                     continue;
                 }
 
-                Strategy strategy = BacktestRunner.buildStrategy(strategyName);
                 SignalBus bus = new SignalBus();
                 AtomicInteger signalCount = new AtomicInteger();
+                AtomicReference<Candle> currentBar = new AtomicReference<>();
                 JSONArray signals = new JSONArray();
                 bus.subscribe(event -> {
+                    Candle bar = currentBar.get();
+                    if (bar == null || bar.getTs().isBefore(from)) return;
                     signalCount.incrementAndGet();
                     signals.put(new JSONObject()
                             .put("symbol", event.symbol())
@@ -92,14 +107,16 @@ public final class TodayReplayRunner {
                             .put("signal", event.signal().name())
                             .put("price", event.currentPrice())
                             .put("stopLoss", event.suggestedStopLoss())
+                            .put("candleTs", bar.getTs().toString())
                             .put("evaluatedAt", event.timestamp().toString()));
                 });
 
                 SignalEvaluator evaluator = new SignalEvaluator(List.of(strategy), bus);
                 Set<String> allowed = Set.of(strategyName.toUpperCase());
-                for (int i = 0; i < candles.size(); i++) {
-                    List<Candle> window = candles.subList(0, i + 1);
-                    Candle bar = candles.get(i);
+                for (int i = 0; i < allCandles.size(); i++) {
+                    List<Candle> window = allCandles.subList(0, i + 1);
+                    Candle bar = allCandles.get(i);
+                    currentBar.set(bar);
                     evaluator.evaluate(item.symbol(), item.token(), bar.getClose(), window, allowed);
                 }
 
@@ -109,11 +126,14 @@ public final class TodayReplayRunner {
                 symbolResults.put(new JSONObject()
                         .put("symbol", item.symbol())
                         .put("token", item.token())
-                        .put("candles", candles.size())
+                        .put("candles", todayCandles.size())
+                        .put("warmupCandles", warmupCandles.size())
+                        .put("evaluationCandles", allCandles.size())
+                        .put("minRequiredCandles", strategy.getMinCandles())
                         .put("signalCount", signalCount.get())
                         .put("lastSignal", last != null ? last.signal() : "NONE")
                         .put("reason", last != null ? last.reason() : "not_evaluated")
-                        .put("lastCandleTs", candles.get(candles.size() - 1).getTs().toString())
+                        .put("lastCandleTs", todayCandles.get(todayCandles.size() - 1).getTs().toString())
                         .put("signals", signals));
 
                 totalSignals += signalCount.get();

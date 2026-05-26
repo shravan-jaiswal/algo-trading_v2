@@ -13,6 +13,19 @@ broker.api.key=YOUR_API_KEY
 # ─── Trading mode ────────────────────────────────────────
 trading.mode=live
 
+# ─── Live candle evaluation ───────────────────────────────
+candle.timeframe=FIVE_MINUTE
+candle.history.bars=20000
+trading.live.historical.refresh.enabled=true
+trading.live.historical.refresh.overlap.bars=3
+trading.live.historical.refresh.fallback.only=true
+trading.live.historical.refresh.max.symbols.per.cycle=1
+trading.live.historical.refresh.sleep.ms=1500
+trading.live.historical.refresh.cooldown.minutes=15
+strategy.loop.settle.seconds=5
+feed.mode=QUOTE
+feed.stale.reconnect.seconds=180
+
 # ─── Risk ─────────────────────────────────────────────────
 risk.capital=1200000
 risk.per.trade=0.01
@@ -29,13 +42,18 @@ trading.option.buy.max.profit=6000
 trading.option.buy.max.loss=3000
 trading.option.write.max.profit=6000
 trading.option.write.max.loss=3000
-
 # Broker product types used by live orders.
 # INTRADAY holdings use the intraday value and are square-off eligible.
 # DELIVERY holdings use equity/derivative delivery values and are not auto squared off by the engine.
 order.product.type.intraday=INTRADAY
 order.product.type.delivery.equity=DELIVERY
 order.product.type.delivery.derivatives=NRML
+order.margin.calculator.enabled=true
+order.margin.buffer.rs=1000
+order.broker.funds.check.enabled=true
+order.broker.flat.entry.cooldown.seconds=300
+order.protected.limit=true
+order.limit.wait.seconds=120
 
 # ─── Database ─────────────────────────────────────────────
 # VSRSI strategy
@@ -43,6 +61,12 @@ order.product.type.delivery.derivatives=NRML
 # REAL uses the corrected trailing Supertrend calculation for testing/retuning.
 strategy.vsrsi.trade.type=BOTH
 strategy.vsrsi.holding.type=INTRADAY
+strategy.vsrsi.instrument.type=FUTURES
+strategy.vsrsi.futures.expiry.offset=0
+strategy.vsrsi.futures.lots=1
+strategy.vsrsi.option.expiry.offset=0
+strategy.vsrsi.option.strike.offset=0
+strategy.vsrsi.option.lots=1
 strategy.vsrsi.supertrend.mode=LEGACY
 strategy.mics.trade.type=BOTH
 strategy.mics.holding.type=INTRADAY

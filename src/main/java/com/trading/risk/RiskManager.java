@@ -56,6 +56,28 @@ public class RiskManager {
         return checkGuards(true);
     }
 
+    public boolean canOpenTrade(double entryPrice, int qty) {
+        double required = entryPrice * qty;
+        return canOpenTradeForCapital(required, "notional");
+    }
+
+    public boolean canOpenTradeForCapital(double requiredCapital, String source) {
+        if (!canTrade()) return false;
+        if (requiredCapital <= 0) {
+            log.warn("Trade blocked by capital | invalid required capital:{} source:{}",
+                    Shared.fmt(requiredCapital), source);
+            return false;
+        }
+        double available = getAvailableCapital();
+        if (requiredCapital > available) {
+            log.warn("Trade blocked by capital | required:Rs.{} source:{} available:Rs.{} deployed:Rs.{} total:Rs.{}",
+                    Shared.fmt(requiredCapital), source, Shared.fmt(available),
+                    Shared.fmt(deployedCapital.get()), Shared.fmt(cfg.capital()));
+            return false;
+        }
+        return true;
+    }
+
     /** Bypass position-count limit for paired hedge legs (e.g. MICS spread). */
     public boolean canTradeIgnoringPositionLimit() {
         return checkGuards(false);
@@ -257,28 +279,43 @@ public class RiskManager {
     // ─────────────────────────────────────────────────────────────────
 
     public void onTradeOpened(String token, double entryPrice, int qty) {
-        double cost = entryPrice * qty;
+        onTradeOpenedWithCapital(token, entryPrice * qty, "notional");
+    }
+
+    public void onTradeOpenedWithCapital(String token, double deployedAmount, String source) {
         openPositions.incrementAndGet();
         tradesToday.incrementAndGet();
-        deployedCapital.updateAndGet(v -> v + cost);
-        symbolDeployed.put(token, cost);
-        log.info("Trade opened | {} | cost:Rs.{} | open:{} | today:{} | deployed:Rs.{}",
-                token, Shared.fmt(cost), openPositions.get(),
+        deployedCapital.updateAndGet(v -> v + deployedAmount);
+        symbolDeployed.put(token, deployedAmount);
+        log.info("Trade opened | {} | deployedAmount:Rs.{} source:{} | open:{} | today:{} | deployed:Rs.{}",
+                token, Shared.fmt(deployedAmount), source, openPositions.get(),
                 tradesToday.get(), Shared.fmt(deployedCapital.get()));
     }
 
     public void restoreOpenTrade(String token, double entryPrice, int qty) {
-        double cost = entryPrice * qty;
+        restoreOpenTradeWithCapital(token, entryPrice * qty, "notional");
+    }
+
+    public void restoreOpenTradeWithCapital(String token, double deployedAmount, String source) {
         openPositions.incrementAndGet();
-        deployedCapital.updateAndGet(v -> v + cost);
-        symbolDeployed.put(token, cost);
-        log.info("Trade restored | {} | cost:Rs.{} | open:{}", token,
-                Shared.fmt(cost), openPositions.get());
+        deployedCapital.updateAndGet(v -> v + deployedAmount);
+        symbolDeployed.put(token, deployedAmount);
+        log.info("Trade restored | {} | deployedAmount:Rs.{} source:{} | open:{}",
+                token, Shared.fmt(deployedAmount), source, openPositions.get());
+    }
+
+    public void syncOpenPositions(int count) {
+        int safeCount = Math.max(0, count);
+        int previous = openPositions.getAndSet(safeCount);
+        if (previous != safeCount) {
+            log.info("Risk open position count synced | previous:{} current:{}", previous, safeCount);
+        }
     }
 
     public void onTradeClosed(String token, double pnl) {
         openPositions.updateAndGet(v -> Math.max(0, v - 1));
-        double deployed = symbolDeployed.remove(token);
+        Double deployedValue = symbolDeployed.remove(token);
+        double deployed = deployedValue == null ? 0 : deployedValue;
         if (deployed > 0) deployedCapital.updateAndGet(v -> Math.max(0, v - deployed));
         symbolPnL.merge(token, pnl, Double::sum);
         clearTSL(token);

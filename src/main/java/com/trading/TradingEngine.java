@@ -32,6 +32,7 @@ import org.json.JSONObject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -92,11 +93,16 @@ public class TradingEngine {
 
     // ── Config ───────────────────────────────────────────────────────
     private final boolean paperMode;
+    private final boolean liveHistoricalRefresh;
     private final int     candleHistoryBars;
     private final String  timeframe;
 
     // ── Telegram ──────────────────────────────────────────────────────
     private TelegramCommandListener telegramListener;
+    private ScheduledExecutorService candleFlushScheduler;
+    private ScheduledExecutorService feedWatchdogScheduler;
+    private ScheduledExecutorService strategyScheduler;
+    private final Map<String, LocalDateTime> evaluatedBars = new ConcurrentHashMap<>();
 
     // ── Cycle counter (increments on every candle close, any token) ──
     private final java.util.concurrent.atomic.AtomicInteger cycleCounter = new java.util.concurrent.atomic.AtomicInteger(0);
@@ -116,6 +122,7 @@ public class TradingEngine {
         this.paperMode         = AppConfig.isPaperMode();
         this.timeframe         = AppConfig.get("candle.timeframe", "FIVE_MINUTE");
         this.candleHistoryBars = AppConfig.getInt("candle.history.bars", 200);
+        this.liveHistoricalRefresh = AppConfig.getBool("trading.live.historical.refresh.enabled", true);
 
         RiskConfig riskCfg = RiskConfig.fromAppConfig();
         this.riskManager   = new RiskManager(riskCfg);
@@ -150,6 +157,7 @@ public class TradingEngine {
             var conn = angelClient.login();
             dataFetcher.setSmartConnect(conn);
             optionResolver = new OptionTokenResolver(conn);
+            if (!paperMode) optionResolver.refreshIfNeeded();
             if (!paperMode) {
                 orderManager.setSmartConnect(conn);
                 log.info("SmartConnect injected into OrderManager (live mode).");
@@ -172,13 +180,15 @@ public class TradingEngine {
                 angelClient.getFeedToken(),
                 this::onTick);
         feed.subscribe(tokens, "NSE");
+        startFeedWatchdog();
 
         tradeMonitor.start(15);
+        startScheduledStrategyLoop();
         // Flush completed candles every minute without waiting for the first tick
         // of the next bar, then upsert live candles so the DB shows the current slot.
-        java.util.concurrent.Executors.newSingleThreadScheduledExecutor(
-                r -> Thread.ofVirtual().unstarted(r))
-            .scheduleAtFixedRate(() -> {
+        candleFlushScheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(
+                r -> Thread.ofVirtual().name("candle-flush").unstarted(r));
+        candleFlushScheduler.scheduleAtFixedRate(() -> {
                 try {
                     var closedCandles = tickProcessor.flushCompleted();
                     for (Candle closed : closedCandles) {
@@ -242,16 +252,30 @@ public class TradingEngine {
 
     private void onCandleClose(String underlyingToken, double underlyingPrice) {
         if (!MarketUtils.isMarketOpen()) return;
-        if (riskManager.isHalted()) return;
 
         WatchlistItem item = findItem(underlyingToken);
         if (item == null) return;
 
-        List<Candle> candles = tickProcessor.getCandles(underlyingToken);
+        if (MarketUtils.isSquareOffTime()) {
+            forceSquareOff(underlyingToken, item.symbol(), item.exchange(), underlyingPrice);
+            return;
+        }
+
+        if (riskManager.isHalted()) return;
+
+        if (liveHistoricalRefresh && !paperMode) {
+            return;
+        }
+
+        List<Candle> candles = tickProcessor.getCompletedCandles(underlyingToken);
         tickProcessor.trim(underlyingToken, candleHistoryBars + 10);
+        if (candles.isEmpty()) return;
 
         String symbol   = item.symbol();
         String exchange = item.exchange();
+        LocalDateTime latestBar = candles.get(candles.size() - 1).getTs();
+        LocalDateTime previous = evaluatedBars.put(underlyingToken, latestBar);
+        if (latestBar.equals(previous)) return;
 
         // Snapshot keys to avoid ConcurrentModificationException when positions close inside loop
         new ArrayList<>(orderManager.getOpenPositions().keySet()).forEach(posKey -> {
@@ -262,11 +286,13 @@ public class TradingEngine {
         signalEvaluator.evaluate(symbol, underlyingToken, underlyingPrice, candles, item.strategies());
 
         int cycle = cycleCounter.incrementAndGet();
-        log.info("Cycle #{} | {} @ Rs.{} | candles:{} | open:{} | pnl:Rs.{}",
+        int riskOpen = orderManager.getRiskManagedOpenPositionCount();
+        riskManager.syncOpenPositions(riskOpen);
+        log.info("Cycle #{} | {} @ Rs.{} | candles:{} | open:{} tracked:{} | pnl:Rs.{}",
                 cycle, symbol,
                 String.format("%.2f", underlyingPrice),
                 candles.size(),
-                orderManager.getOpenPositions().size(),
+                riskOpen, orderManager.getOpenPositions().size(),
                 String.format("%.2f", riskManager.getDailyProfit() - riskManager.getDailyLoss()));
         if (cycle % 12 == 0) {
             riskManager.printStatus();
@@ -357,12 +383,14 @@ public class TradingEngine {
                         riskManager.calculateTakeProfit(price, sl, sig),
                         com.trading.strategy.InstrumentType.EQUITY);
                 takeProfits.put(posKey, tp);
+                stopLosses.put(posKey, sl);
                 positionTokens.put(posKey, token);
                 positionSymbols.put(posKey, symbol);
                 positionExchanges.put(posKey, exchange);
                 riskManager.initTSL(posKey, price);
                 saveOpenTrade(posKey, symbol, token, exchange,
                         event.strategyName(), "BUY", qty, price, sl, tp);
+                placeBrokerStopLossIfNeeded(symbol, token, exchange, posKey, sl);
                 log.info("Long opened | {} qty={} entry=Rs.{} sl=Rs.{} tp=Rs.{}",
                         symbol, qty, price, sl, tp);
             }
@@ -412,7 +440,7 @@ public class TradingEngine {
             return;
         }
 
-        String optSymbol = underlying + optionType;
+        String optSymbol = resolution.symbol();
         int    qty       = resolution.lotSize() * instrCfg.numberOfLots();
         subscribeOptionToken(resolution.token());
         double optionPrice = tradePriceForInstrument(resolution.token(), price, optSymbol);
@@ -439,6 +467,7 @@ public class TradingEngine {
             positionExchanges.put(posKey, "NFO");
             saveOpenTrade(posKey, optSymbol, resolution.token(), "NFO",
                     stratName, "BUY", qty, optionPrice, sl, tp);
+            placeBrokerStopLossIfNeeded(optSymbol, resolution.token(), "NFO", posKey, sl);
             log.info("Option BUY | {} token={} qty={} @ Rs.{} | tp=Rs.{} sl=Rs.{} [{}]",
                     optSymbol, resolution.token(), qty, optionPrice, tp, sl,
                     slPct > 0 ? String.format("pct sl=%.0f%% tp=%.0f%%", slPct * 100, tpPct * 100)
@@ -486,7 +515,7 @@ public class TradingEngine {
             return;
         }
 
-        String optSymbol = underlying + optionType;
+        String optSymbol = resolution.symbol();
         int    qty       = resolution.lotSize() * instrCfg.numberOfLots();
         subscribeOptionToken(resolution.token());
         double optionPrice = tradePriceForInstrument(resolution.token(), price, optSymbol);
@@ -508,6 +537,7 @@ public class TradingEngine {
             positionExchanges.put(posKey, "NFO");
             saveOpenTrade(posKey, optSymbol, resolution.token(), "NFO",
                     stratName, "SELL", qty, optionPrice, sl, tp);
+            placeBrokerStopLossIfNeeded(optSymbol, resolution.token(), "NFO", posKey, sl);
             log.info("Option WRITE | {} token={} qty={} @ Rs.{} | buyback_tp=Rs.{} (max+{}) sl=Rs.{} (max-{})",
                     optSymbol, resolution.token(), qty, optionPrice,
                     tp, (int) maxProfit, sl, (int) maxLoss);
@@ -534,7 +564,7 @@ public class TradingEngine {
         }
 
         String futToken  = resolution.token();
-        String futSymbol = underlying + "FUT";
+        String futSymbol = resolution.symbol();
         int    qty       = resolution.lotSize() * instrCfg.numberOfLots();
         subscribeOptionToken(futToken);
         double futPrice = tradePriceForInstrument(futToken, price, futSymbol);
@@ -581,12 +611,14 @@ public class TradingEngine {
                         riskManager.calculateTakeProfit(futPrice, sl, sig),
                         com.trading.strategy.InstrumentType.FUTURES);
                 takeProfits.put(posKey, tp);
+                stopLosses.put(posKey, sl);
                 positionTokens.put(posKey, futToken);
                 positionSymbols.put(posKey, futSymbol);
                 positionExchanges.put(posKey, "NFO");
                 riskManager.initTSL(posKey, futPrice);
                 saveOpenTrade(posKey, futSymbol, futToken, "NFO",
                         stratName, "BUY", qty, futPrice, sl, tp);
+                placeBrokerStopLossIfNeeded(futSymbol, futToken, "NFO", posKey, sl);
                 log.info("Futures LONG | {} token={} qty={} @ Rs.{} sl=Rs.{} tp=Rs.{}",
                         underlying, futToken, qty, futPrice, sl, tp);
             }
@@ -612,12 +644,14 @@ public class TradingEngine {
                         riskManager.calculateTakeProfit(futPrice, sl, sig),
                         com.trading.strategy.InstrumentType.FUTURES);
                 takeProfits.put(posKey, tp);
+                stopLosses.put(posKey, sl);
                 positionTokens.put(posKey, futToken);
                 positionSymbols.put(posKey, futSymbol);
                 positionExchanges.put(posKey, "NFO");
                 riskManager.initTSLShort(posKey, futPrice);
                 saveOpenTrade(posKey, futSymbol, futToken, "NFO",
                         stratName, "SELL", qty, futPrice, sl, tp);
+                placeBrokerStopLossIfNeeded(futSymbol, futToken, "NFO", posKey, sl);
                 log.info("Futures SHORT | {} token={} qty={} @ Rs.{} sl=Rs.{} tp=Rs.{}",
                         underlying, futToken, qty, futPrice, sl, tp);
             }
@@ -644,8 +678,16 @@ public class TradingEngine {
                     break;
                 }
             }
-            log.warn("No live LTP for {} token={} - skipping order to avoid using underlying price",
+            log.warn("No stream LTP for {} token={} after wait - fetching broker LTP",
                     symbol, token);
+            double brokerLtp = angelClient.getLTP("NFO", symbol, token);
+            if (brokerLtp > 0) {
+                latestLtp.put(token, brokerLtp);
+                log.info("Broker LTP used | {} token={} price=Rs.{}",
+                        symbol, token, String.format("%.2f", brokerLtp));
+                return brokerLtp;
+            }
+            log.error("Broker LTP failed for {} token={} - order skipped", symbol, token);
             return 0;
         }
 
@@ -794,6 +836,18 @@ public class TradingEngine {
         openTradeRecords.put(posKey, t);
     }
 
+    private void placeBrokerStopLossIfNeeded(String symbol, String token, String exchange,
+                                             String posKey, double stopLoss) {
+        if (stopLoss <= 0) return;
+        boolean placed = orderManager.placeStopLoss(symbol, token, exchange, posKey, stopLoss);
+        if (!placed && !paperMode) {
+            log.error("Broker SL not placed | {} key={} trigger=Rs.{} | software SL remains active",
+                    symbol, posKey, stopLoss);
+            TelegramAlert.sendAsync("Broker SL not placed for " + symbol
+                    + " @ Rs." + String.format("%.2f", stopLoss));
+        }
+    }
+
     /** Persists the trade close to DB and removes all per-position state. */
     private void clearPositionState(String posKey, double exitPrice) {
         clearPositionState(posKey, exitPrice, exitHandler.consumeLastExitReason(posKey, "UNKNOWN"));
@@ -826,6 +880,10 @@ public class TradingEngine {
     private void backfillHistory() {
         if (watchlist.isEmpty()) return;
         int days = Math.max(AppConfig.getInt("candle.history.bars", 200) / 75, 5);
+        int initialSeedDays = Math.min(days, 10);
+        int barMinutes = timeframeMinutes();
+        int refreshSleepMs = brokerSafeHistoricalSleepMs();
+        boolean cooldownLogged = false;
 
         for (WatchlistItem item : watchlist) {
             try {
@@ -833,22 +891,36 @@ public class TradingEngine {
 
                 // Fetch from API if connected and there is a gap (last candle is older than one interval)
                 if (dataFetcher.isConnected()) {
-                    LocalDateTime lastTs = historical.isEmpty()
-                            ? null
-                            : historical.get(historical.size() - 1).getTs();
-                    LocalDateTime now = LocalDateTime.now(MarketUtils.IST);
-                    boolean hasGap = lastTs == null
-                            || lastTs.isBefore(now.minusMinutes(timeframeMinutes()));
-
-                    if (hasGap || historical.size() < candleHistoryBars / 2) {
-                        log.info("Gap detected for {} — fetching from API (last candle: {})",
-                                item.symbol(), lastTs);
-                        var fetched = dataFetcher.backfill(item, timeframe, days);
+                    if (dataFetcher.isRateLimitCoolingDown()) {
+                        if (!cooldownLogged) {
+                            cooldownLogged = true;
+                            log.warn("Startup historical backfill paused by broker rate limit cooldown ({}s remaining)",
+                                    dataFetcher.rateLimitCooldownSeconds());
+                        }
+                    } else if (historical.isEmpty()) {
+                        log.info("No local candles for {} — seeding last {} days from API",
+                                item.symbol(), initialSeedDays);
+                        var fetched = dataFetcher.backfill(item, timeframe, initialSeedDays);
                         if (!fetched.isEmpty()) {
-                            // Re-read DB so the seed includes both old + newly fetched candles
                             historical = candleRepo.findRecent(item.token(), timeframe, candleHistoryBars);
                         }
-                        try { Thread.sleep(1200); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                        if (!sleepBetweenHistoricalRefreshes(refreshSleepMs)) return;
+                    } else {
+                        LocalDateTime lastTs = historical.get(historical.size() - 1).getTs();
+                        LocalDateTime targetTs = latestRegularClosedBarStart(barMinutes);
+                        boolean hasGap = lastTs.isBefore(targetTs);
+
+                        if (hasGap) {
+                            LocalDateTime from = lastTs.minusMinutes((long) barMinutes * 3);
+                            log.info("Gap detected for {} — fetching missing API range (last candle: {}, target: {})",
+                                    item.symbol(), lastTs, targetTs);
+                            var fetched = dataFetcher.backfillRange(item, timeframe, from, targetTs);
+                            if (!fetched.isEmpty()) {
+                                // Re-read DB so the seed includes both old + newly fetched candles
+                                historical = candleRepo.findRecent(item.token(), timeframe, candleHistoryBars);
+                            }
+                            if (!sleepBetweenHistoricalRefreshes(refreshSleepMs)) return;
+                        }
                     }
                 }
 
@@ -865,14 +937,40 @@ public class TradingEngine {
             String posKey = (t.getPosKey() != null && !t.getPosKey().isBlank())
                     ? t.getPosKey()
                     : t.getToken() + "|" + t.getStrategyName(); // legacy fallback for old DB rows
+            String exchange = t.getExchange() != null ? t.getExchange() : "NSE";
+            if (!paperMode && !orderManager.brokerHasMatchingOpenPosition(
+                    t.getSymbol(), t.getToken(), exchange, t.getSide())) {
+                closeRestoredTradeAsSynced(t, "BROKER_FLAT_ON_RESTORE");
+                orderManager.recordBrokerFlatSync(t.getSymbol());
+                log.warn("Skipped stale restored trade - broker is flat or side differs | {} {} key={}",
+                        t.getSide(), t.getSymbol(), posKey);
+                continue;
+            }
+            if (orderManager.hasOpenPositionForSymbol(t.getSymbol())) {
+                closeRestoredTradeAsSynced(t, "DUPLICATE_SYMBOL_ON_RESTORE");
+                log.warn("Skipped duplicate restored trade - symbol already restored | {} {} key={}",
+                        t.getSide(), t.getSymbol(), posKey);
+                continue;
+            }
+            String restoredProductType = productTypeForStrategyName(t.getStrategyName());
             orderManager.restorePosition(posKey, t.getEntryPrice(), t.getQuantity(), t.getSide(),
-                    t.getSymbol(), productTypeForStrategyName(t.getStrategyName()));
-            riskManager.restoreOpenTrade(posKey, t.getEntryPrice(), t.getQuantity());
+                    t.getSymbol(), restoredProductType);
+            if (OrderManager.isRiskManagedProductType(restoredProductType)) {
+                double deployedCapital = orderManager.estimateDeployedCapital(
+                        t.getSymbol(), t.getToken(), exchange, t.getQuantity(), t.getEntryPrice(),
+                        t.getSide(), restoredProductType);
+                riskManager.restoreOpenTradeWithCapital(posKey, deployedCapital,
+                        paperMode ? "notional" : "restore-margin");
+            } else {
+                riskManager.syncOpenPositions(orderManager.getRiskManagedOpenPositionCount());
+                log.info("Delivery restored outside intraday risk limits | {} key={} product={}",
+                        t.getSymbol(), posKey, restoredProductType);
+            }
 
             // Restore position state maps
             positionTokens.put(posKey, t.getToken());
             positionSymbols.put(posKey, t.getSymbol());
-            positionExchanges.put(posKey, t.getExchange() != null ? t.getExchange() : "NSE");
+            positionExchanges.put(posKey, exchange);
             if (t.getTakeProfit() > 0) takeProfits.put(posKey, t.getTakeProfit());
             if (t.getStopLoss()   > 0) stopLosses.put(posKey, t.getStopLoss());
             openTradeRecords.put(posKey, t);  // restored trades can be closed to DB on exit
@@ -885,8 +983,20 @@ public class TradingEngine {
 
             log.info("Restored open trade: {} {} x{} @ Rs.{}",
                     t.getSide(), t.getSymbol(), t.getQuantity(), t.getEntryPrice());
+            if (t.getStopLoss() > 0) {
+                placeBrokerStopLossIfNeeded(t.getSymbol(), t.getToken(), exchange, posKey, t.getStopLoss());
+            }
         }
         if (!open.isEmpty()) log.info("{} open trades restored from DB.", open.size());
+    }
+
+    private void closeRestoredTradeAsSynced(ExecutedTrade trade, String reason) {
+        trade.setExitPrice(trade.getEntryPrice());
+        trade.setExitTime(LocalDateTime.now(MarketUtils.IST));
+        trade.setPnl(0);
+        trade.setStatus("CLOSED");
+        trade.setExitReason(reason);
+        tradeRepo.close(trade);
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -904,6 +1014,10 @@ public class TradingEngine {
         });
 
         tickProcessor.flush();   // save the in-progress bar so it's not lost on restart
+        if (candleFlushScheduler != null) candleFlushScheduler.shutdownNow();
+        if (feedWatchdogScheduler != null) feedWatchdogScheduler.shutdownNow();
+        if (strategyScheduler != null) strategyScheduler.shutdownNow();
+        if (feed != null) feed.disconnect();
         tradeMonitor.stop();
         dashboard.stop();
         if (telegramListener != null) telegramListener.stop();
@@ -970,13 +1084,8 @@ public class TradingEngine {
 
         List<Strategy> list = new ArrayList<>();
 
-        // ── VSRSI — always FUTURES ────────────────────────────────────
-        InstrumentConfig vsrsiInstr = new InstrumentConfig(
-                com.trading.strategy.InstrumentType.FUTURES, "NFO",
-                AppConfig.getInt("trading.futures.expiry.offset", 0),
-                0,
-                AppConfig.getInt("trading.futures.lots", 1),
-                true);
+        // VSRSI can trade equity, futures, or options through strategy.vsrsi.instrument.type.
+        InstrumentConfig vsrsiInstr = buildVsrsiInstrumentConfig();
 
         list.add(new VwapSupertrendRsiStrategy(
                 AppConfig.getInt(   "strategy.vsrsi.atr.period",      10),
@@ -1001,6 +1110,56 @@ public class TradingEngine {
                 com.trading.strategy.mics.MicsConfig.fromAppConfig(), micsOptionInstr));
         list.forEach(s -> strategyMap.put(s.getName(), s));
         return list;
+    }
+
+    static InstrumentConfig buildVsrsiInstrumentConfig() {
+        String instrType = AppConfig.get("strategy.vsrsi.instrument.type", "FUTURES")
+                .trim()
+                .toUpperCase();
+
+        return switch (instrType) {
+            case "OPTION", "OPTIONS", "OPTION_BUY" -> {
+                int expiryOffset = AppConfig.getInt("strategy.vsrsi.option.expiry.offset",
+                        AppConfig.getInt("trading.option.expiry.offset", 0));
+                int strikeOffset = AppConfig.getInt("strategy.vsrsi.option.strike.offset",
+                        AppConfig.getInt("trading.option.strike.offset", 0));
+                int numberOfLots = AppConfig.getInt("strategy.vsrsi.option.lots",
+                        AppConfig.getInt("trading.option.lots", 1));
+                log.info("VSRSI instrument: OPTION_BUY | expiry={} strike={} lots={}",
+                        expiryOffset, strikeOffset, numberOfLots);
+                yield InstrumentConfig.optionBuy(expiryOffset, strikeOffset, numberOfLots);
+            }
+            case "OPTION_WRITE", "OPTION_SELL", "OPTION_SHORT" -> {
+                int expiryOffset = AppConfig.getInt("strategy.vsrsi.option.expiry.offset",
+                        AppConfig.getInt("trading.option.expiry.offset", 0));
+                int strikeOffset = AppConfig.getInt("strategy.vsrsi.option.strike.offset",
+                        AppConfig.getInt("trading.option.strike.offset", 1));
+                int numberOfLots = AppConfig.getInt("strategy.vsrsi.option.lots",
+                        AppConfig.getInt("trading.option.lots", 1));
+                log.info("VSRSI instrument: OPTION_WRITE | expiry={} strike={} lots={}",
+                        expiryOffset, strikeOffset, numberOfLots);
+                yield InstrumentConfig.optionWrite(expiryOffset, strikeOffset, numberOfLots);
+            }
+            case "EQUITY" -> {
+                log.info("VSRSI instrument: EQUITY");
+                yield InstrumentConfig.EQUITY;
+            }
+            case "FUTURE", "FUTURES" -> buildVsrsiFuturesInstrumentConfig();
+            default -> {
+                log.warn("Unknown strategy.vsrsi.instrument.type={} - using FUTURES", instrType);
+                yield buildVsrsiFuturesInstrumentConfig();
+            }
+        };
+    }
+
+    private static InstrumentConfig buildVsrsiFuturesInstrumentConfig() {
+        int expiryOffset = AppConfig.getInt("strategy.vsrsi.futures.expiry.offset",
+                AppConfig.getInt("trading.futures.expiry.offset", 0));
+        int numberOfLots = AppConfig.getInt("strategy.vsrsi.futures.lots",
+                AppConfig.getInt("trading.futures.lots", 1));
+        log.info("VSRSI instrument: FUTURES | expiry={} lots={}", expiryOffset, numberOfLots);
+        return new InstrumentConfig(InstrumentType.FUTURES, "NFO",
+                expiryOffset, 0, numberOfLots, true);
     }
 
     private WatchlistItem findItem(String token) {
@@ -1037,5 +1196,168 @@ public class TradingEngine {
         } catch (Exception e) {
             log.warn("Could not subscribe option/futures token {} to feed: {}", token, e.getMessage());
         }
+    }
+
+    private void startFeedWatchdog() {
+        if (paperMode || feed == null) return;
+        long staleMs = AppConfig.getInt("feed.stale.reconnect.seconds", 180) * 1000L;
+        feedWatchdogScheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(
+                r -> Thread.ofVirtual().name("feed-watchdog").unstarted(r));
+        feedWatchdogScheduler.scheduleAtFixedRate(() -> {
+            try {
+                if (!MarketUtils.isMarketOpen()) return;
+                long ageMs = feed.lastTickAgeMs();
+                if (!feed.isConnected() || ageMs > staleMs) {
+                    String age = ageMs == Long.MAX_VALUE ? "never" : (ageMs / 1000) + "s";
+                    log.warn("SmartStream stale/no ticks | connected={} lastTickAge={} threshold={}s",
+                            feed.isConnected(), age, staleMs / 1000);
+                    feed.reconnectNow("stale_or_no_ticks");
+                }
+            } catch (Exception e) {
+                log.warn("Feed watchdog error: {}", e.getMessage());
+            }
+        }, 60, 60, java.util.concurrent.TimeUnit.SECONDS);
+    }
+
+    private void startScheduledStrategyLoop() {
+        if (paperMode) return;
+        int settleSeconds = AppConfig.getInt("strategy.loop.settle.seconds", 5);
+        long initialDelay = millisUntilNextBarClose(timeframeMinutes(), settleSeconds);
+        long periodMs = timeframeMinutes() * 60_000L;
+        int overlapBars = AppConfig.getInt("trading.live.historical.refresh.overlap.bars", 3);
+        boolean fallbackOnly = AppConfig.getBool("trading.live.historical.refresh.fallback.only", true);
+        int maxRefreshPerCycle = Math.max(0,
+                AppConfig.getInt("trading.live.historical.refresh.max.symbols.per.cycle", 1));
+        int refreshSleepMs = brokerSafeHistoricalSleepMs();
+
+        strategyScheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(
+                r -> Thread.ofVirtual().name("strategy-loop").unstarted(r));
+        strategyScheduler.scheduleAtFixedRate(() -> {
+            try {
+                if (!MarketUtils.isMarketOpen()) return;
+                boolean squareOffTime = MarketUtils.isSquareOffTime();
+                if (!squareOffTime && riskManager.isHalted()) return;
+
+                int refreshed = 0;
+                int refreshAttempts = 0;
+                int evaluated = 0;
+                LocalDateTime expectedClosedBar = latestClosedBarStart(timeframeMinutes());
+                tickProcessor.flushCompleted();
+                tickProcessor.persistLiveSnapshots();
+                for (WatchlistItem item : watchlist) {
+                    List<Candle> candles = recentRegularCandles(item.token());
+                    if (shouldRefreshFromHistorical(candles, expectedClosedBar, fallbackOnly)
+                            && refreshAttempts < maxRefreshPerCycle
+                            && !dataFetcher.isRateLimitCoolingDown()) {
+                        refreshAttempts++;
+                        refreshed += dataFetcher.refreshRecentClosedCandles(
+                                item, timeframe, timeframeMinutes(), overlapBars);
+                        if (!sleepBetweenHistoricalRefreshes(refreshSleepMs)) return;
+                        candles = recentRegularCandles(item.token());
+                    }
+                    if (candles.isEmpty()) continue;
+
+                    Candle latest = candles.get(candles.size() - 1);
+                    latestLtp.put(item.token(), latest.getClose());
+                    if (squareOffTime) {
+                        forceSquareOff(item.token(), item.symbol(), item.exchange(), latest.getClose());
+                        evaluated++;
+                        continue;
+                    }
+
+                    LocalDateTime previous = evaluatedBars.put(item.token(), latest.getTs());
+                    if (latest.getTs().equals(previous)) continue;
+
+                    new ArrayList<>(orderManager.getOpenPositions().keySet()).forEach(posKey -> {
+                        if (!posKey.startsWith(item.token() + "|")) return;
+                        checkAndExit(posKey, item.token(), item.symbol(), item.exchange(), latest.getClose());
+                    });
+
+                    signalEvaluator.evaluate(
+                            item.symbol(), item.token(), latest.getClose(), candles, item.strategies());
+                    evaluated++;
+                }
+
+                int cycle = cycleCounter.incrementAndGet();
+                String cooldown = dataFetcher.isRateLimitCoolingDown()
+                        ? dataFetcher.rateLimitCooldownSeconds() + "s" : "off";
+                int riskOpen = orderManager.getRiskManagedOpenPositionCount();
+                riskManager.syncOpenPositions(riskOpen);
+                log.info("Cycle #{} [SCHEDULED] | symbols:{} evaluated:{} refreshed:{} refreshAttempts:{} histCooldown:{} open:{} tracked:{} pnl:Rs.{}",
+                        cycle, watchlist.size(), evaluated, refreshed, refreshAttempts, cooldown,
+                        riskOpen, orderManager.getOpenPositions().size(),
+                        String.format("%.2f", riskManager.getDailyProfit() - riskManager.getDailyLoss()));
+            } catch (Exception e) {
+                log.error("Scheduled strategy loop error: {}", e.getMessage(), e);
+            }
+        }, initialDelay, periodMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+
+        log.info("Scheduled strategy loop aligned to {}m bar close | initialDelay:{}s historicalRefresh:{} fallbackOnly:{} maxRefreshPerCycle:{} refreshSleep:{}ms",
+                timeframeMinutes(), initialDelay / 1000, liveHistoricalRefresh,
+                fallbackOnly, maxRefreshPerCycle, refreshSleepMs);
+    }
+
+    private List<Candle> recentRegularCandles(String token) {
+        return candleRepo.findRecent(token, timeframe, candleHistoryBars).stream()
+                .filter(c -> MarketUtils.isRegularMarketSession(c.getTs()))
+                .toList();
+    }
+
+    private boolean shouldRefreshFromHistorical(List<Candle> candles,
+                                                LocalDateTime expectedClosedBar,
+                                                boolean fallbackOnly) {
+        if (!liveHistoricalRefresh || dataFetcher == null || !dataFetcher.isConnected()) return false;
+        if (!fallbackOnly) return true;
+        if (candles == null || candles.isEmpty()) return true;
+        Candle latest = candles.get(candles.size() - 1);
+        return latest.getTs().isBefore(expectedClosedBar);
+    }
+
+    private static boolean sleepBetweenHistoricalRefreshes(int sleepMs) {
+        if (sleepMs <= 0) return true;
+        try {
+            Thread.sleep(sleepMs);
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    private static int brokerSafeHistoricalSleepMs() {
+        int configuredSleepMs = AppConfig.getInt("trading.live.historical.refresh.sleep.ms", 1500);
+        int refreshSleepMs = Math.max(configuredSleepMs, 1500);
+        if (configuredSleepMs < refreshSleepMs) {
+            log.warn("Historical refresh sleep {}ms is below broker-safe minimum; using {}ms",
+                    configuredSleepMs, refreshSleepMs);
+        }
+        return refreshSleepMs;
+    }
+
+    private static long millisUntilNextBarClose(int candleMinutes, int settleSeconds) {
+        LocalDateTime now = LocalDateTime.now(MarketUtils.IST);
+        LocalDateTime base = now.withSecond(0).withNano(0);
+        int nextMinute = ((base.getMinute() / candleMinutes) + 1) * candleMinutes;
+        LocalDateTime next = nextMinute >= 60
+                ? base.plusHours(1).withMinute(0)
+                : base.withMinute(nextMinute);
+        next = next.withSecond(0).withNano(0).plusSeconds(settleSeconds);
+        return Math.max(1_000L, Duration.between(now, next).toMillis());
+    }
+
+    private static LocalDateTime latestClosedBarStart(int candleMinutes) {
+        LocalDateTime now = LocalDateTime.now(MarketUtils.IST);
+        LocalDateTime currentSlot = now.withSecond(0).withNano(0)
+                .withMinute((now.getMinute() / candleMinutes) * candleMinutes);
+        return currentSlot.minusMinutes(candleMinutes);
+    }
+
+    private static LocalDateTime latestRegularClosedBarStart(int candleMinutes) {
+        LocalDateTime candidate = latestClosedBarStart(candleMinutes);
+        for (int i = 0; i < 2_000; i++) {
+            if (MarketUtils.isRegularMarketSession(candidate)) return candidate;
+            candidate = candidate.minusMinutes(candleMinutes);
+        }
+        return candidate;
     }
 }

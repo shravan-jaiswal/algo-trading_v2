@@ -26,6 +26,28 @@ class TickProcessorTest {
         assertEquals(LocalDateTime.of(2026, 5, 19, 14, 5), closed.getTs());
         assertEquals(LocalDateTime.of(2026, 5, 19, 14, 10),
                 processor.getCandles("1333").get(1).getTs());
+        assertEquals(1, processor.getCompletedCandles("1333").size());
+        assertEquals(LocalDateTime.of(2026, 5, 19, 14, 5),
+                processor.getCompletedCandles("1333").get(0).getTs());
+        assertEquals(LocalDateTime.of(2026, 5, 19, 14, 10),
+                processor.getCandles("1333").get(1).getTs());
+    }
+
+    @Test
+    void flushCompletedMovesLiveCandleToCompletedWithoutNullSentinel() {
+        TickProcessor processor = new TickProcessor(5, null);
+
+        LocalDateTime oldSlot = LocalDateTime.of(2026, 5, 19, 14, 5, 30);
+
+        processor.process(new Tick("1333", 100, 0, 0, 0, 0, 10, oldSlot));
+
+        var flushed = processor.flushCompleted();
+
+        assertEquals(1, flushed.size());
+        assertEquals(1, processor.getCompletedCandles("1333").size());
+        assertEquals(1, processor.getCandles("1333").size());
+        assertEquals(LocalDateTime.of(2026, 5, 19, 14, 5),
+                processor.getCompletedCandles("1333").get(0).getTs());
     }
 
     @Test

@@ -100,17 +100,17 @@ public class TickProcessor {
         LocalDateTime now         = LocalDateTime.now(MarketUtils.IST);
         LocalDateTime currentSlot = truncate(now, barMinutes);
         List<Candle> closedCandles = new ArrayList<>();
+        List<String> flushedTokens = new ArrayList<>();
 
         liveCandles.forEach((token, candle) -> {
             if (candle != null && truncate(candle.getTs(), barMinutes).isBefore(currentSlot)) {
                 persistCandle(candle);
                 getBuffer(token).add(candle);
                 closedCandles.add(candle);
-                liveCandles.put(token, null);   // mark as flushed; cleared on next tick
+                flushedTokens.add(token);
             }
         });
-        // Remove null sentinels left by flush
-        liveCandles.entrySet().removeIf(e -> e.getValue() == null);
+        flushedTokens.forEach(liveCandles::remove);
         return closedCandles;
     }
 
@@ -146,6 +146,11 @@ public class TickProcessor {
         List<Candle> all  = new ArrayList<>(buf);
         if (live != null) all.add(live);
         return all;
+    }
+
+    /** Returns only completed candles for signal evaluation. */
+    public List<Candle> getCompletedCandles(String token) {
+        return new ArrayList<>(getBuffer(token));
     }
 
     /** Seed the buffer from historical data (called on startup). */

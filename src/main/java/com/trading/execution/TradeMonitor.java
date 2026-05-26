@@ -40,8 +40,13 @@ public final class TradeMonitor {
 
     private void report() {
         try {
+            riskManager.syncOpenPositions(orderManager.getRiskManagedOpenPositionCount());
             log.info("-- Trade Monitor ------------------------------------------");
             log.info("  Open positions  : {}", riskManager.getOpenPositions());
+            int tracked = orderManager.getOpenPositions().size();
+            if (tracked != riskManager.getOpenPositions()) {
+                log.info("  Tracked total   : {} (delivery/manual ignored for risk)", tracked);
+            }
             log.info("  Trades today    : {}", riskManager.getTradesToday());
             log.info("  Daily P&L       : Rs.{}", Shared.fmtPnl(riskManager.getDailyProfit() - riskManager.getDailyLoss()));
             log.info("  Daily loss      : Rs.{}", Shared.fmt(riskManager.getDailyLoss()));
@@ -49,9 +54,9 @@ public final class TradeMonitor {
             log.info("  Available cap   : Rs.{}", Shared.fmt(riskManager.getAvailableCapital()));
             log.info("  Halted          : {}", riskManager.isHalted());
 
-            var positions = orderManager.getOpenPositions();
+            var positions = orderManager.getRiskManagedOpenPositions();
             if (!positions.isEmpty()) {
-                log.info("  -- Open positions --");
+                log.info("  -- Algo risk positions --");
                 positions.forEach((key, p) ->
                     log.info("    {} | {} {} x{} @ Rs.{}",
                             p.symbol().isEmpty() ? key : p.symbol(),

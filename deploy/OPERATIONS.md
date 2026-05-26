@@ -153,6 +153,13 @@ http://103.212.121.27:8080/replay/today?strategy=MICS&token=1333
 http://103.212.121.27:8080/replay/today?strategy=MICS&timeframe=FIVE_MINUTE
 ```
 
+Replay automatically uses the required previous candles from `public.candles` as warm-up so strategies like MICS can calculate EMA/ADX/BB indicators early in the day. If the DB does not have enough prior candles, the reason remains `insufficient_candles:x/required`.
+
+The response keeps `candles` as today's candle count and adds:
+- `warmupCandles`: previous candles loaded before today from the candles table
+- `evaluationCandles`: warm-up plus today candles
+- `minRequiredCandles`: strategy warm-up requirement
+
 ### Replay API From VPS
 ```bash
 curl "http://localhost:8080/replay/today?strategy=MICS"
@@ -257,9 +264,36 @@ Live broker orders also use holding-aware product types:
 order.product.type.intraday=INTRADAY
 order.product.type.delivery.equity=DELIVERY
 order.product.type.delivery.derivatives=NRML
+order.margin.calculator.enabled=true
+order.margin.buffer.rs=1000
+order.broker.funds.check.enabled=true
+order.broker.flat.entry.cooldown.seconds=300
+order.protected.limit=true
+order.limit.wait.seconds=120
 ```
 
 Entry, exit, and stop-loss orders use the same product type for the tracked position. If your Angel One account expects a different carry-forward product for F&O, set `order.product.type.delivery.derivatives` accordingly on the VPS.
+For live NFO orders, the engine asks Angel SmartAPI `getMarginDetails` for required margin and tracks that margin in deployed capital instead of full futures notional. If the margin API is unavailable, it falls back to full notional so the system does not overtrade blind.
+When the engine discovers that a locally tracked position is already flat in the broker account, it skips the exit order and blocks fresh entries for that underlying for this cooldown window.
+Order limits use exactly one broker-safe tick from the execution instrument LTP/reference. NSE equity and NFO futures use a Rs.0.10 tick, so with LTP Rs.910.00 a BUY places Rs.910.10 and SELL/SHORT places Rs.909.90. Options keep Rs.0.05. It will not chase a far offered price such as Rs.920.
+
+### VSRSI Instrument Type
+VSRSI defaults to futures so existing live behavior is preserved:
+```properties
+strategy.vsrsi.instrument.type=FUTURES
+strategy.vsrsi.futures.expiry.offset=0
+strategy.vsrsi.futures.lots=1
+```
+
+To trade options from VSRSI signals:
+```properties
+strategy.vsrsi.instrument.type=OPTION_BUY
+strategy.vsrsi.option.expiry.offset=0
+strategy.vsrsi.option.strike.offset=0
+strategy.vsrsi.option.lots=1
+```
+
+With `OPTION_BUY`, a VSRSI `LONG` buys the selected CE and a VSRSI `SHORT` buys the selected PE. Option strike selection uses the underlying signal price, then the engine trades using the option token LTP/reference price.
 
 ### VSRSI Supertrend Mode
 VSRSI supports two Supertrend modes:

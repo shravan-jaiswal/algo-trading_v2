@@ -18,9 +18,10 @@ public final class MarketUtils {
     public static final LocalTime MARKET_CLOSE = LocalTime.of(15, 30);
     public static final LocalTime SQUARE_OFF   = LocalTime.of(15, 15);
 
-    // NSE/NFO standard tick size for all instrument types
-    public static final double TICK_EQUITY  = 0.05;
-    public static final double TICK_FUTURES = 0.05;
+    // Broker-safe order tick sizes. Some equity/futures symbols reject 0.05
+    // protected-limit prices, so use 0.10 for those live order prices.
+    public static final double TICK_EQUITY  = 0.10;
+    public static final double TICK_FUTURES = 0.10;
     public static final double TICK_OPTIONS = 0.05;
 
     private MarketUtils() {}
