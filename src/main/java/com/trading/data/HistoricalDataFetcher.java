@@ -142,7 +142,12 @@ public class HistoricalDataFetcher {
 
         JSONArray data = smartConnect.candleData(params);
         if (data == null) {
-            log.warn("No candle data returned for {}", item.symbol());
+            // SmartAPI sometimes returns the plain-text rate-limit response
+            // "Access denied because of exceeding access rate". Its SDK logs a
+            // JSON parse error and returns null, so no exception reaches us.
+            log.warn("No candle data returned for {} - pausing historical API requests",
+                    item.symbol());
+            enterRateLimitCooldown();
             return candles;
         }
         for (int i = 0; i < data.length(); i++) {
@@ -192,7 +197,8 @@ public class HistoricalDataFetcher {
     private void enterRateLimitCooldown() {
         int cooldownMinutes = Math.max(1,
                 AppConfig.getInt("trading.live.historical.refresh.cooldown.minutes", 15));
-        rateLimitCooldownUntilMs = System.currentTimeMillis() + cooldownMinutes * 60_000L;
+        rateLimitCooldownUntilMs = Math.max(rateLimitCooldownUntilMs,
+                System.currentTimeMillis() + cooldownMinutes * 60_000L);
         log.warn("Historical API rate limit detected - pausing live historical refresh for {} minutes",
                 cooldownMinutes);
     }

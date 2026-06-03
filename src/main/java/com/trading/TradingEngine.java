@@ -10,6 +10,7 @@ import com.trading.execution.ExitHandler;
 import com.trading.execution.OrderManager;
 import com.trading.execution.PaperBroker;
 import com.trading.execution.TradeMonitor;
+import com.trading.indicator.TimeframeAggregator;
 import com.trading.model.*;
 import com.trading.notification.TelegramAlert;
 import com.trading.notification.TelegramCommandListener;
@@ -26,6 +27,10 @@ import com.trading.strategy.Strategy.Signal;
 import com.trading.strategy.mics.MultiIndicatorConfluenceStrategy;
 import com.trading.strategy.MACrossoverStrategy;
 import com.trading.strategy.VwapSupertrendRsiStrategy;
+import com.trading.strategy.scalping.MomentumScalpingConfig;
+import com.trading.strategy.scalping.MomentumScalpingStrategy;
+import com.trading.strategy.smc.SmcConfig;
+import com.trading.strategy.smc.SmcLiquiditySweepStrategy;
 import com.trading.utils.MarketUtils;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -102,6 +107,7 @@ public class TradingEngine {
     private ScheduledExecutorService candleFlushScheduler;
     private ScheduledExecutorService feedWatchdogScheduler;
     private ScheduledExecutorService strategyScheduler;
+    private ScheduledExecutorService intradayPositionGuardScheduler;
     private final Map<String, LocalDateTime> evaluatedBars = new ConcurrentHashMap<>();
 
     // ── Cycle counter (increments on every candle close, any token) ──
@@ -120,7 +126,11 @@ public class TradingEngine {
         this.signalAuditRepo = new StrategySignalAuditRepository(db);
 
         this.paperMode         = AppConfig.isPaperMode();
-        this.timeframe         = AppConfig.get("candle.timeframe", "FIVE_MINUTE");
+        String configuredTimeframe = AppConfig.get("candle.timeframe", "ONE_MINUTE");
+        if (!"ONE_MINUTE".equalsIgnoreCase(configuredTimeframe)) {
+            log.warn("candle.timeframe={} ignored - live source pipeline uses ONE_MINUTE", configuredTimeframe);
+        }
+        this.timeframe         = "ONE_MINUTE";
         this.candleHistoryBars = AppConfig.getInt("candle.history.bars", 200);
         this.liveHistoricalRefresh = AppConfig.getBool("trading.live.historical.refresh.enabled", true);
 
@@ -183,6 +193,7 @@ public class TradingEngine {
         startFeedWatchdog();
 
         tradeMonitor.start(15);
+        startIntradayPositionGuard();
         startScheduledStrategyLoop();
         // Flush completed candles every minute without waiting for the first tick
         // of the next bar, then upsert live candles so the DB shows the current slot.
@@ -283,7 +294,7 @@ public class TradingEngine {
             checkAndExit(posKey, underlyingToken, symbol, exchange, underlyingPrice);
         });
 
-        signalEvaluator.evaluate(symbol, underlyingToken, underlyingPrice, candles, item.strategies());
+        evaluateTimeframes(item, underlyingPrice, candles);
 
         int cycle = cycleCounter.incrementAndGet();
         int riskOpen = orderManager.getRiskManagedOpenPositionCount();
@@ -465,6 +476,7 @@ public class TradingEngine {
             positionTokens.put(posKey, resolution.token());
             positionSymbols.put(posKey, optSymbol);
             positionExchanges.put(posKey, "NFO");
+            riskManager.initTSL(posKey, optionPrice);
             saveOpenTrade(posKey, optSymbol, resolution.token(), "NFO",
                     stratName, "BUY", qty, optionPrice, sl, tp);
             placeBrokerStopLossIfNeeded(optSymbol, resolution.token(), "NFO", posKey, sl);
@@ -535,6 +547,7 @@ public class TradingEngine {
             positionTokens.put(posKey, resolution.token());
             positionSymbols.put(posKey, optSymbol);
             positionExchanges.put(posKey, "NFO");
+            riskManager.initTSLShort(posKey, optionPrice);
             saveOpenTrade(posKey, optSymbol, resolution.token(), "NFO",
                     stratName, "SELL", qty, optionPrice, sl, tp);
             placeBrokerStopLossIfNeeded(optSymbol, resolution.token(), "NFO", posKey, sl);
@@ -925,6 +938,7 @@ public class TradingEngine {
                 }
 
                 tickProcessor.seed(item.token(), historical);
+                rebuildAndPersistAggregates(historical);
             } catch (Exception e) {
                 log.error("Backfill failed for {}: {}", item.symbol(), e.getMessage());
             }
@@ -1017,6 +1031,7 @@ public class TradingEngine {
         if (candleFlushScheduler != null) candleFlushScheduler.shutdownNow();
         if (feedWatchdogScheduler != null) feedWatchdogScheduler.shutdownNow();
         if (strategyScheduler != null) strategyScheduler.shutdownNow();
+        if (intradayPositionGuardScheduler != null) intradayPositionGuardScheduler.shutdownNow();
         if (feed != null) feed.disconnect();
         tradeMonitor.stop();
         dashboard.stop();
@@ -1108,6 +1123,8 @@ public class TradingEngine {
                 AppConfig.getInt("trading.option.lots",          1));
         list.add(new MultiIndicatorConfluenceStrategy(
                 com.trading.strategy.mics.MicsConfig.fromAppConfig(), micsOptionInstr));
+        list.add(new MomentumScalpingStrategy(MomentumScalpingConfig.fromAppConfig(), micsOptionInstr));
+        list.add(new SmcLiquiditySweepStrategy(SmcConfig.fromAppConfig(), micsOptionInstr));
         list.forEach(s -> strategyMap.put(s.getName(), s));
         return list;
     }
@@ -1179,6 +1196,34 @@ public class TradingEngine {
         };
     }
 
+    private void evaluateTimeframes(WatchlistItem item, double price, List<Candle> candles1m) {
+        signalEvaluator.evaluate(item.symbol(), item.token(), price, candles1m,
+                item.strategies(), "ONE_MINUTE");
+
+        List<Candle> candles5m = TimeframeAggregator.toFiveMinutes(candles1m);
+        persistLatest(candles5m);
+        if (!candles5m.isEmpty()) {
+            signalEvaluator.evaluate(item.symbol(), item.token(), price, candles5m,
+                    item.strategies(), "FIVE_MINUTE");
+        }
+
+        persistLatest(TimeframeAggregator.toFifteenMinutes(candles5m));
+    }
+
+    private void rebuildAndPersistAggregates(List<Candle> candles1m) {
+        List<Candle> candles5m = TimeframeAggregator.toFiveMinutes(candles1m);
+        persistCandles(candles5m);
+        persistCandles(TimeframeAggregator.toFifteenMinutes(candles5m));
+    }
+
+    private void persistCandles(List<Candle> candles) {
+        for (Candle candle : candles) candleRepo.upsert(candle);
+    }
+
+    private void persistLatest(List<Candle> candles) {
+        if (!candles.isEmpty()) candleRepo.upsert(candles.get(candles.size() - 1));
+    }
+
     private double calcAtr(String token) {
         var candles = tickProcessor.getCandles(token);
         if (candles.size() < 15) return 0;
@@ -1217,6 +1262,59 @@ public class TradingEngine {
                 log.warn("Feed watchdog error: {}", e.getMessage());
             }
         }, 60, 60, java.util.concurrent.TimeUnit.SECONDS);
+    }
+
+    private void startIntradayPositionGuard() {
+        if (paperMode) return;
+        int intervalSeconds = Math.max(60,
+                AppConfig.getInt("trading.intraday.position.guard.seconds", 60));
+        intradayPositionGuardScheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(
+                r -> Thread.ofVirtual().name("intraday-position-guard").unstarted(r));
+        intradayPositionGuardScheduler.scheduleAtFixedRate(() -> {
+            try {
+                if (!MarketUtils.isMarketOpen()) return;
+                for (String posKey : new ArrayList<>(orderManager.getOpenPositions().keySet())) {
+                    if (!isIntradayPosition(posKey)) continue;
+
+                    String token = positionTokens.getOrDefault(posKey, posKey);
+                    String symbol = positionSymbols.getOrDefault(posKey, posKey);
+                    String exchange = positionExchanges.getOrDefault(posKey, "NSE");
+                    String side = orderManager.getPositionSide(posKey);
+                    double entryPrice = orderManager.getEntryPrice(posKey);
+
+                    OrderManager.BrokerPositionSync sync = orderManager.reconcileBrokerPosition(
+                            symbol, token, exchange, posKey);
+                    if (sync == OrderManager.BrokerPositionSync.FLAT_SYNCED) {
+                        clearPositionState(posKey, entryPrice, "BROKER_MANUAL_EXIT");
+                        continue;
+                    }
+                    if (sync != OrderManager.BrokerPositionSync.OPEN || side == null) continue;
+
+                    double price = latestLtp.getOrDefault(token, 0.0);
+                    if (price > 0) {
+                        checkAndExit(posKey, token, symbol, exchange, price);
+                    }
+                    if (!orderManager.hasOpenPosition(posKey)) continue;
+
+                    double fixedStop = stopLosses.getOrDefault(posKey, 0.0);
+                    double trailingStop = riskManager.getTSL(posKey);
+                    double protectiveStop = tighterStop(side, fixedStop, trailingStop);
+                    placeBrokerStopLossIfNeeded(symbol, token, exchange, posKey, protectiveStop);
+                }
+                riskManager.syncOpenPositions(orderManager.getRiskManagedOpenPositionCount());
+            } catch (Exception e) {
+                log.warn("Intraday position guard error: {}", e.getMessage(), e);
+            }
+        }, intervalSeconds, intervalSeconds, java.util.concurrent.TimeUnit.SECONDS);
+        log.info("Intraday position guard started | interval={}s", intervalSeconds);
+    }
+
+    static double tighterStop(String side, double fixedStop, double trailingStop) {
+        if (fixedStop <= 0) return trailingStop;
+        if (trailingStop <= 0) return fixedStop;
+        return "SELL".equalsIgnoreCase(side)
+                ? Math.min(fixedStop, trailingStop)
+                : Math.max(fixedStop, trailingStop);
     }
 
     private void startScheduledStrategyLoop() {
@@ -1273,8 +1371,7 @@ public class TradingEngine {
                         checkAndExit(posKey, item.token(), item.symbol(), item.exchange(), latest.getClose());
                     });
 
-                    signalEvaluator.evaluate(
-                            item.symbol(), item.token(), latest.getClose(), candles, item.strategies());
+                    evaluateTimeframes(item, latest.getClose(), candles);
                     evaluated++;
                 }
 

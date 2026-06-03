@@ -72,6 +72,26 @@ class SignalEvaluatorTest {
         }
     }
 
+    @Test
+    void routesByPreferredTimeframeAndDeduplicatesClosedBar() {
+        SignalBus bus = new SignalBus();
+        AtomicInteger published = new AtomicInteger();
+        bus.subscribe(event -> published.incrementAndGet());
+
+        Strategy oneMinute = new TimedFixedStrategy("ONE", "ONE_MINUTE", Strategy.Signal.LONG);
+        Strategy fiveMinute = new TimedFixedStrategy("FIVE", "FIVE_MINUTE", Strategy.Signal.LONG);
+        SignalEvaluator evaluator = new SignalEvaluator(List.of(oneMinute, fiveMinute), bus);
+        List<Candle> oneMinuteCandles = List.of(new Candle("123", "ONE_MINUTE",
+                LocalDateTime.of(2026, 5, 19, 9, 20), 100, 101, 99, 100.5, 1000));
+
+        evaluator.evaluate("ABC", "123", 100.5, oneMinuteCandles, Set.of("ONE", "FIVE"), "ONE_MINUTE");
+        evaluator.evaluate("ABC", "123", 100.5, oneMinuteCandles, Set.of("ONE", "FIVE"), "ONE_MINUTE");
+
+        assertEquals(1, published.get());
+        assertNotNull(evaluator.lastAudits().get("123|ONE"));
+        assertNull(evaluator.lastAudits().get("123|FIVE"));
+    }
+
     private static List<Candle> candles(int count) {
         LocalDateTime start = LocalDateTime.of(2026, 5, 19, 9, 15);
         return java.util.stream.IntStream.range(0, count)
@@ -84,5 +104,12 @@ class SignalEvaluatorTest {
         @Override public String getName() { return "FIXED"; }
         @Override public Signal evaluate(List<Candle> candles) { return signal; }
         @Override public int getMinCandles() { return minCandles; }
+    }
+
+    private record TimedFixedStrategy(String name, String timeframe, Signal signal) implements Strategy {
+        @Override public String getName() { return name; }
+        @Override public String preferredTimeframe() { return timeframe; }
+        @Override public Signal evaluate(List<Candle> candles) { return signal; }
+        @Override public int getMinCandles() { return 1; }
     }
 }

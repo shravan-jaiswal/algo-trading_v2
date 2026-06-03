@@ -11,22 +11,41 @@ import static org.junit.jupiter.api.Assertions.*;
 class TimeframeAggregatorTest {
 
     @Test
-    void aggregatesByClockBucketNotByRowPosition() {
+    void aggregatesFullBucketsAlignedFromMarketOpen() {
         List<Candle> candles = List.of(
-                candle("T", "FIVE_MINUTE", 13, 5, 100),
-                candle("T", "FIVE_MINUTE", 13, 10, 101),
-                candle("T", "FIVE_MINUTE", 13, 15, 102),
-                candle("T", "FIVE_MINUTE", 13, 20, 103));
+                candle("T", "FIVE_MINUTE", 9, 15, 100),
+                candle("T", "FIVE_MINUTE", 9, 20, 101),
+                candle("T", "FIVE_MINUTE", 9, 25, 102),
+                candle("T", "FIVE_MINUTE", 9, 30, 103));
 
         List<Candle> aggregated = TimeframeAggregator.toFifteenMinutes(candles);
 
-        assertEquals(2, aggregated.size());
-        assertEquals(LocalDateTime.of(2026, 5, 19, 13, 0), aggregated.get(0).getTs());
+        assertEquals(1, aggregated.size());
+        assertEquals(LocalDateTime.of(2026, 5, 19, 9, 15), aggregated.get(0).getTs());
         assertEquals(99.5, aggregated.get(0).getOpen());
-        assertEquals(101, aggregated.get(0).getClose());
-        assertEquals(LocalDateTime.of(2026, 5, 19, 13, 15), aggregated.get(1).getTs());
-        assertEquals(101.5, aggregated.get(1).getOpen());
-        assertEquals(103, aggregated.get(1).getClose());
+        assertEquals(102, aggregated.get(0).getClose());
+    }
+
+    @Test
+    void aggregatesOneMinuteCandlesIntoFiveMinuteOhlcv() {
+        List<Candle> candles = List.of(
+                candle("T", "ONE_MINUTE", 9, 15, 100),
+                candle("T", "ONE_MINUTE", 9, 16, 101),
+                candle("T", "ONE_MINUTE", 9, 17, 102),
+                candle("T", "ONE_MINUTE", 9, 18, 103),
+                candle("T", "ONE_MINUTE", 9, 19, 104),
+                candle("T", "ONE_MINUTE", 9, 20, 105));
+
+        List<Candle> aggregated = TimeframeAggregator.toFiveMinutes(candles);
+
+        assertEquals(1, aggregated.size());
+        Candle bar = aggregated.get(0);
+        assertEquals(LocalDateTime.of(2026, 5, 19, 9, 15), bar.getTs());
+        assertEquals(99.5, bar.getOpen());
+        assertEquals(105, bar.getHigh());
+        assertEquals(99, bar.getLow());
+        assertEquals(104, bar.getClose());
+        assertEquals(5000, bar.getVolume());
     }
 
     private static Candle candle(String token, String timeframe, int hour, int minute, double close) {

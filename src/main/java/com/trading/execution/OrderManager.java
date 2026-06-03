@@ -42,6 +42,12 @@ public class OrderManager {
     private record SlOrder(String orderId, String symbol, String token, String exchange, String variety) {}
     private record FillResult(boolean filled, boolean shouldCancel) {}
     private record OrderSnapshot(String status, int filledQty, String message) {}
+    public enum BrokerPositionSync {
+        OPEN,
+        FLAT_SYNCED,
+        SIDE_MISMATCH,
+        UNAVAILABLE
+    }
 
     private volatile SmartConnect smartConnect;
     private final RiskManager riskManager;
@@ -53,8 +59,10 @@ public class OrderManager {
     private final boolean marginCalculatorEnabled;
     private final boolean brokerFundsCheckEnabled;
     private final double marginBuffer;
+    private final long brokerOrderBookFailureCooldownMs;
     private final String productType;
     private static final long BROKER_POSITION_CACHE_MS = 5000L;
+    private static final long BROKER_ORDER_BOOK_CACHE_MS = 5000L;
 
     private final Map<String, TrackedPosition> openPositions = new ConcurrentHashMap<>();
     private final Map<String, String> slOrderIds = new ConcurrentHashMap<>();
@@ -62,6 +70,9 @@ public class OrderManager {
     private final Map<String, Long> brokerFlatEntryBlockedUntil = new ConcurrentHashMap<>();
     private volatile JSONObject cachedBrokerPositions;
     private volatile long cachedBrokerPositionsUntil;
+    private volatile JSONObject cachedBrokerOrderBook;
+    private volatile long cachedBrokerOrderBookUntil;
+    private volatile long brokerOrderBookFailureCooldownUntil;
 
     public OrderManager(SmartConnect smartConnect, RiskManager riskManager,
                         boolean paperMode, PaperBroker paperBroker) {
@@ -75,6 +86,8 @@ public class OrderManager {
         this.marginCalculatorEnabled = AppConfig.getBool("order.margin.calculator.enabled", true);
         this.brokerFundsCheckEnabled = AppConfig.getBool("order.broker.funds.check.enabled", true);
         this.marginBuffer = Math.max(0, AppConfig.getDouble("order.margin.buffer.rs", 1000));
+        this.brokerOrderBookFailureCooldownMs = Math.max(5,
+                AppConfig.getInt("order.broker.orderbook.failure.cooldown.seconds", 60)) * 1000L;
         this.productType = AppConfig.get("order.product.type", "INTRADAY");
     }
 
@@ -309,7 +322,14 @@ public class OrderManager {
                 return true;
             }
             if (existing == null) {
-                log.warn("Could not verify existing SL orders before placement | {} [{}]", symbol, token);
+                String trackedSlId = slOrderIds.get(positionKey);
+                if (!isBlank(trackedSlId)) {
+                    log.warn("Could not verify tracked SL order - preserving existing protection | {} [{}] orderId:{}",
+                            symbol, token, trackedSlId);
+                    return true;
+                }
+                log.warn("Could not verify existing SL orders before initial/recovery placement | {} [{}]",
+                        symbol, token);
             }
 
             String slSide = "BUY".equals(pos.side()) ? "SELL" : "BUY";
@@ -402,6 +422,53 @@ public class OrderManager {
             log.warn("Broker position check unavailable for restore | {} [{}]: {}",
                     symbol, token, e.getMessage());
             return true;
+        }
+    }
+
+    /**
+     * Reconciles one locally tracked intraday position with the broker.
+     * A broker-flat position is removed locally without placing a second exit order.
+     */
+    public BrokerPositionSync reconcileBrokerPosition(String symbol, String token,
+                                                       String exchange, String positionKey) {
+        if (paperMode) return BrokerPositionSync.OPEN;
+        TrackedPosition local = openPositions.get(positionKey);
+        if (local == null) return BrokerPositionSync.FLAT_SYNCED;
+
+        try {
+            BrokerPosition brokerPosition = fetchBrokerPosition(symbol, token, exchange);
+            if (brokerPosition == null || brokerPosition.isFlat()) {
+                if (!cancelPendingSlOrder(positionKey, symbol, token, exchange)) {
+                    log.warn("Broker-flat sync could not verify/cancel protective SL | {} key={}",
+                            symbol, positionKey);
+                }
+                openPositions.remove(positionKey);
+                positionProductTypes.remove(positionKey);
+                riskManager.onTradeClosed(positionKey, 0);
+                recordBrokerFlatSync(symbol);
+                log.warn("Broker position manually flattened | {} key={} | local state synced",
+                        symbol, positionKey);
+                TelegramAlert.sendAsync("Broker position manually flattened - local state synced: " + symbol);
+                return BrokerPositionSync.FLAT_SYNCED;
+            }
+            if (!brokerPosition.matchesOpeningSide(local.side())) {
+                log.error("Broker side mismatch during minute sync | {} key={} | localSide={} brokerNetQty={}",
+                        symbol, positionKey, local.side(), brokerPosition.netQty());
+                TelegramAlert.sendAsync("CRITICAL: broker side mismatch for " + symbol
+                        + " netQty=" + brokerPosition.netQty());
+                return BrokerPositionSync.SIDE_MISMATCH;
+            }
+            if (brokerPosition.absQty() != local.qty()) {
+                log.warn("Broker qty differs during minute sync | {} key={} | localQty:{} brokerQty:{}",
+                        symbol, positionKey, local.qty(), brokerPosition.absQty());
+                TelegramAlert.sendAsync("Broker quantity differs for " + symbol
+                        + " local=" + local.qty() + " broker=" + brokerPosition.absQty());
+            }
+            return BrokerPositionSync.OPEN;
+        } catch (Exception e) {
+            log.warn("Broker position minute sync unavailable | {} key={}: {}",
+                    symbol, positionKey, e.getMessage());
+            return BrokerPositionSync.UNAVAILABLE;
         }
     }
 
@@ -866,11 +933,13 @@ public class OrderManager {
     }
 
     private boolean cancelPendingSlOrder(String positionKey, String symbol, String token, String exchange) {
-        String slId = slOrderIds.remove(positionKey);
+        String slId = slOrderIds.get(positionKey);
         boolean trackedSlCancelled = false;
         if (slId != null) {
             try {
                 smartConnect.cancelOrder(slId, "STOPLOSS");
+                slOrderIds.remove(positionKey, slId);
+                invalidateBrokerOrderBookCache();
                 trackedSlCancelled = true;
                 log.info("Tracked SL cancelled | {} | orderId:{} | key={}",
                         symbol, slId, positionKey);
@@ -900,6 +969,7 @@ public class OrderManager {
         for (SlOrder sl : openStopLosses) {
             try {
                 smartConnect.cancelOrder(sl.orderId(), sl.variety());
+                invalidateBrokerOrderBookCache();
                 log.info("Protective SL cancelled from order book | {} | orderId:{} | key={}",
                         symbol, sl.orderId(), positionKey);
             } catch (Exception e) {
@@ -961,6 +1031,14 @@ public class OrderManager {
     }
 
     private JSONObject getOrderBook() throws Exception {
+        long now = System.currentTimeMillis();
+        if (now < brokerOrderBookFailureCooldownUntil) {
+            throw new IllegalStateException("order book cooldown active");
+        }
+        JSONObject cached = cachedBrokerOrderBook;
+        if (cached != null && now < cachedBrokerOrderBookUntil) {
+            return cached;
+        }
         java.lang.reflect.Field routesField = SmartConnect.class.getDeclaredField("routes");
         routesField.setAccessible(true);
         Object routes = routesField.get(smartConnect);
@@ -971,9 +1049,24 @@ public class OrderManager {
         java.lang.reflect.Field handlerField = SmartConnect.class.getDeclaredField("smartAPIRequestHandler");
         handlerField.setAccessible(true);
         Object handler = handlerField.get(smartConnect);
-        return (JSONObject) handler.getClass()
-                .getMethod("getRequest", String.class, String.class, String.class)
-                .invoke(handler, smartConnect.getApiKey(), route, smartConnect.getAccessToken());
+        try {
+            JSONObject fresh = (JSONObject) handler.getClass()
+                    .getMethod("getRequest", String.class, String.class, String.class)
+                    .invoke(handler, smartConnect.getApiKey(), route, smartConnect.getAccessToken());
+            if (fresh == null) throw new IllegalStateException("null order book response");
+            cachedBrokerOrderBook = fresh;
+            cachedBrokerOrderBookUntil = now + BROKER_ORDER_BOOK_CACHE_MS;
+            brokerOrderBookFailureCooldownUntil = 0;
+            return fresh;
+        } catch (Exception e) {
+            brokerOrderBookFailureCooldownUntil = now + brokerOrderBookFailureCooldownMs;
+            throw e;
+        }
+    }
+
+    private void invalidateBrokerOrderBookCache() {
+        cachedBrokerOrderBook = null;
+        cachedBrokerOrderBookUntil = 0;
     }
 
     private static JSONArray extractOrderRows(JSONObject resp) {

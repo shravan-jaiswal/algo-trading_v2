@@ -37,6 +37,11 @@ public interface Strategy {
 
     int getMinCandles();
 
+    /** Live candle timeframe routed to this strategy. Existing strategies remain on 5-minute bars. */
+    default String preferredTimeframe() {
+        return "FIVE_MINUTE";
+    }
+
     default InstrumentConfig getInstrumentConfig() {
         return InstrumentConfig.EQUITY;
     }

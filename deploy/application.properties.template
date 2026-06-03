@@ -14,7 +14,8 @@ broker.api.key=YOUR_API_KEY
 trading.mode=live
 
 # ─── Live candle evaluation ───────────────────────────────
-candle.timeframe=FIVE_MINUTE
+# Live ticks are stored as 1-minute candles. The engine derives completed 5m and 15m candles.
+candle.timeframe=ONE_MINUTE
 candle.history.bars=20000
 trading.live.historical.refresh.enabled=true
 trading.live.historical.refresh.overlap.bars=3
@@ -23,6 +24,7 @@ trading.live.historical.refresh.max.symbols.per.cycle=1
 trading.live.historical.refresh.sleep.ms=1500
 trading.live.historical.refresh.cooldown.minutes=15
 strategy.loop.settle.seconds=5
+trading.intraday.position.guard.seconds=60
 feed.mode=QUOTE
 feed.stale.reconnect.seconds=180
 
@@ -31,13 +33,13 @@ risk.capital=1200000
 risk.per.trade=0.01
 risk.max.daily.loss=0.02
 risk.max.daily.profit=0.10
-risk.max.trades.day=10
-risk.max.open.positions=5
+risk.max.trades.day=5
+risk.max.open.positions=2
 
 # ─── Instrument ───────────────────────────────────────────
 # EQUITY | FUTURES | OPTION_BUY | OPTION_WRITE
 trading.instrument.type=OPTION_BUY
-trading.option.lots=2
+trading.option.lots=1
 trading.option.buy.max.profit=6000
 trading.option.buy.max.loss=3000
 trading.option.write.max.profit=6000
@@ -52,6 +54,7 @@ order.margin.calculator.enabled=true
 order.margin.buffer.rs=1000
 order.broker.funds.check.enabled=true
 order.broker.flat.entry.cooldown.seconds=300
+order.broker.orderbook.failure.cooldown.seconds=60
 order.protected.limit=true
 order.limit.wait.seconds=120
 
@@ -70,6 +73,39 @@ strategy.vsrsi.option.lots=1
 strategy.vsrsi.supertrend.mode=LEGACY
 strategy.mics.trade.type=BOTH
 strategy.mics.holding.type=INTRADAY
+strategy.scalping.trade.type=BOTH
+strategy.scalping.holding.type=INTRADAY
+strategy.scalping.ema.fast=9
+strategy.scalping.ema.slow=21
+strategy.scalping.rsi.period=14
+strategy.scalping.rsi.bull=55
+strategy.scalping.rsi.bear=45
+strategy.scalping.macd.fast=12
+strategy.scalping.macd.slow=26
+strategy.scalping.macd.signal=9
+strategy.scalping.atr.period=14
+strategy.scalping.atr.stop.multiplier=1.5
+strategy.scalping.atr.min.pct=0.0005
+strategy.scalping.opening.range.minutes=15
+strategy.scalping.swing.lookback=10
+strategy.scalping.volume.avg.period=20
+strategy.scalping.volume.spike.ratio=1.2
+strategy.scalping.entry.start=09:20
+strategy.scalping.entry.cutoff=15:00
+strategy.scalping.require.15m.bias=false
+strategy.smc.trade.type=BOTH
+strategy.smc.holding.type=INTRADAY
+strategy.smc.atr.period=14
+strategy.smc.atr.stop.multiplier=1.5
+strategy.smc.liquidity.lookback=20
+strategy.smc.sweep.recent.bars=5
+strategy.smc.swing.lookback=10
+strategy.smc.equal.level.atr.tolerance=0.15
+strategy.smc.fvg.min.atr.pct=0.10
+strategy.smc.volume.avg.period=20
+strategy.smc.volume.spike.ratio=1.2
+strategy.smc.entry.start=09:20
+strategy.smc.entry.cutoff=15:00
 strategy.ma.trade.type=BOTH
 strategy.ma.holding.type=INTRADAY
 strategy.rsi.trade.type=BOTH

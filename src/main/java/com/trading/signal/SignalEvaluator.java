@@ -12,6 +12,8 @@ import com.trading.strategy.TradeType;
 import com.trading.strategy.VwapSupertrendRsiStrategy;
 import com.trading.strategy.mics.MultiIndicatorConfluenceStrategy;
 import com.trading.strategy.mics.StrategySignal;
+import com.trading.strategy.scalping.MomentumScalpingStrategy;
+import com.trading.strategy.smc.SmcLiquiditySweepStrategy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -33,6 +35,7 @@ public final class SignalEvaluator {
     private final SignalBus      bus;
     private final StrategySignalAuditRepository auditRepo;
     private final Map<String, StrategySignalAudit> lastAudits = new ConcurrentHashMap<>();
+    private final Map<String, java.time.LocalDateTime> evaluatedBars = new ConcurrentHashMap<>();
 
     public SignalEvaluator(List<Strategy> strategies, SignalBus bus) {
         this(strategies, bus, null);
@@ -53,10 +56,23 @@ public final class SignalEvaluator {
                          double currentPrice, List<Candle> candles,
                          Set<String> allowedStrategies) {
         if (candles == null || candles.isEmpty()) return;
+        evaluate(symbol, token, currentPrice, candles, allowedStrategies,
+                candles.get(candles.size() - 1).getTimeframe());
+    }
+
+    public void evaluate(String symbol, String token,
+                         double currentPrice, List<Candle> candles,
+                         Set<String> allowedStrategies, String timeframe) {
+        if (candles == null || candles.isEmpty()) return;
+        Candle latest = candles.get(candles.size() - 1);
 
         for (Strategy strategy : strategies) {
             if (allowedStrategies == null
                     || !allowedStrategies.contains(strategy.getName().toUpperCase())) continue;
+            if (!strategy.preferredTimeframe().equalsIgnoreCase(timeframe)) continue;
+            String evalKey = token + "|" + strategy.getName() + "|" + timeframe;
+            java.time.LocalDateTime previous = evaluatedBars.put(evalKey, latest.getTs());
+            if (latest.getTs().equals(previous)) continue;
             if (candles.size() < strategy.getMinCandles()) {
                 audit(symbol, token, currentPrice, candles, strategy, Strategy.Signal.NONE,
                         "insufficient_candles:" + candles.size() + "/" + strategy.getMinCandles());
@@ -128,6 +144,12 @@ public final class SignalEvaluator {
         }
         if (strategy instanceof VwapSupertrendRsiStrategy vsrsi) {
             return vsrsi.getLastReason();
+        }
+        if (strategy instanceof MomentumScalpingStrategy scalping) {
+            return scalping.getLastResult().reason();
+        }
+        if (strategy instanceof SmcLiquiditySweepStrategy smc) {
+            return smc.getLastResult().reason();
         }
         return "no_signal";
     }
