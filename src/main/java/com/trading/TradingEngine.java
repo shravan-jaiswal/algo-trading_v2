@@ -115,6 +115,7 @@ public class TradingEngine {
 
     // ── Shutdown ──────────────────────────────────────────────────────
     private volatile boolean running = false;
+    private volatile boolean restartRequested = false;
 
     public TradingEngine() {
         this.db             = new DatabaseConfig();
@@ -218,6 +219,7 @@ public class TradingEngine {
         if (!botToken.isEmpty() && !chatId.isEmpty()) {
             telegramListener = new TelegramCommandListener(
                     botToken, chatId, riskManager, orderManager, this::closeAllPositions,
+                    this::restartFromTelegram,
                     strategyMap.keySet().stream().sorted().toList());
             telegramListener.start();
         }
@@ -456,32 +458,46 @@ public class TradingEngine {
         subscribeOptionToken(resolution.token());
         double optionPrice = tradePriceForInstrument(resolution.token(), price, optSymbol);
         if (optionPrice <= 0) return;
-        log.info("Option order | {} | lotSize={} x {}lots = {} qty",
-                optSymbol, resolution.lotSize(), instrCfg.numberOfLots(), qty);
+        double entryDiscountPct = AppConfig.getDouble("trading.option.buy.entry.discount.pct", 0.01);
+        double entryPrice = optionBuyEntryPrice(optionPrice, entryDiscountPct);
+        log.info("Option order | {} | lotSize={} x {}lots = {} qty | ltp=Rs.{} entryLimit=Rs.{} discount={}%",
+                optSymbol, resolution.lotSize(), instrCfg.numberOfLots(), qty,
+                optionPrice, entryPrice, entryDiscountPct * 100);
 
-        boolean opened = orderManager.buy(optSymbol, resolution.token(), "NFO", posKey, qty, optionPrice,
-                productTypeFor(stratName, InstrumentType.OPTION_BUY));
+        String productType = productTypeFor(stratName, InstrumentType.OPTION_BUY);
+        boolean opened = entryDiscountPct > 0
+                ? orderManager.buyLimit(optSymbol, resolution.token(), "NFO", posKey, qty,
+                        entryPrice, entryPrice, productType)
+                : orderManager.buy(optSymbol, resolution.token(), "NFO", posKey, qty,
+                        entryPrice, productType);
         if (opened) {
             double slPct   = AppConfig.getDouble("trading.option.buy.sl.pct", 0);
             double tpPct   = AppConfig.getDouble("trading.option.buy.tp.pct", 0);
             double maxLoss = AppConfig.getDouble("trading.option.buy.max.loss", 3000);
-            double slDist  = (slPct > 0) ? optionPrice * slPct : maxLoss / qty;
-            double tpDist  = (tpPct > 0) ? optionPrice * tpPct : maxLoss * 2 / qty;
-            double sl = MarketUtils.roundToTick(Math.max(0.05, optionPrice - slDist),
+            double slDist  = (slPct > 0) ? entryPrice * slPct : maxLoss / qty;
+            double tpDist  = (tpPct > 0) ? entryPrice * tpPct : maxLoss * 2 / qty;
+            double sl = MarketUtils.roundToTick(Math.max(0.05, entryPrice - slDist),
                     com.trading.strategy.InstrumentType.OPTION_BUY);
-            double tp = MarketUtils.roundToTick(optionPrice + tpDist,
+            double tp = MarketUtils.roundToTick(entryPrice + tpDist,
                     com.trading.strategy.InstrumentType.OPTION_BUY);
             takeProfits.put(posKey, tp);
             stopLosses.put(posKey, sl);
             positionTokens.put(posKey, resolution.token());
             positionSymbols.put(posKey, optSymbol);
             positionExchanges.put(posKey, "NFO");
-            riskManager.initTSL(posKey, optionPrice);
+            double stepTriggerPct = AppConfig.getDouble("trading.option.buy.tsl.trigger.step.pct", 0.02);
+            double stepStopPct = AppConfig.getDouble("trading.option.buy.tsl.stop.step.pct", 0.01);
+            if (slPct > 0 && stepTriggerPct > 0 && stepStopPct > 0) {
+                riskManager.initStepTSL(posKey, entryPrice, slPct, stepTriggerPct, stepStopPct);
+            } else {
+                riskManager.initTSL(posKey, entryPrice,
+                        optionBuyTrailPct(entryPrice, slDist, riskManager.getTslTrailPct()));
+            }
             saveOpenTrade(posKey, optSymbol, resolution.token(), "NFO",
-                    stratName, "BUY", qty, optionPrice, sl, tp);
+                    stratName, "BUY", qty, entryPrice, sl, tp);
             placeBrokerStopLossIfNeeded(optSymbol, resolution.token(), "NFO", posKey, sl);
             log.info("Option BUY | {} token={} qty={} @ Rs.{} | tp=Rs.{} sl=Rs.{} [{}]",
-                    optSymbol, resolution.token(), qty, optionPrice, tp, sl,
+                    optSymbol, resolution.token(), qty, entryPrice, tp, sl,
                     slPct > 0 ? String.format("pct sl=%.0f%% tp=%.0f%%", slPct * 100, tpPct * 100)
                               : String.format("fixed sl=-Rs.%.0f tp=+Rs.%.0f", maxLoss, maxLoss * 2));
         }
@@ -769,6 +785,14 @@ public class TradingEngine {
         TelegramAlert.sendAsync("All positions closed via /closeall.");
     }
 
+    private void restartFromTelegram() {
+        log.warn("Restart requested via Telegram /restart");
+        restartRequested = true;
+        TelegramAlert.send("Restarting TradingEngine via /restart.");
+        shutdown();
+        System.exit(1);
+    }
+
     private void forceSquareOff(String underlyingToken, String symbol, String exchange, double underlyingPrice) {
         new ArrayList<>(orderManager.getOpenPositions().keySet()).forEach(posKey -> {
             if (!posKey.startsWith(underlyingToken + "|")) return;
@@ -1022,10 +1046,14 @@ public class TradingEngine {
         running = false;
         log.info("TradingEngine shutting down...");
 
-        latestLtp.forEach((token, price) -> {
-            WatchlistItem item = findItem(token);
-            if (item != null) forceSquareOff(token, item.symbol(), item.exchange(), price);
-        });
+        if (!restartRequested) {
+            latestLtp.forEach((token, price) -> {
+                WatchlistItem item = findItem(token);
+                if (item != null) forceSquareOff(token, item.symbol(), item.exchange(), price);
+            });
+        } else {
+            log.warn("Restart shutdown requested - skipping square-off before service restart.");
+        }
 
         tickProcessor.flush();   // save the in-progress bar so it's not lost on restart
         if (candleFlushScheduler != null) candleFlushScheduler.shutdownNow();
@@ -1039,7 +1067,7 @@ public class TradingEngine {
         if (!paperMode) angelClient.logout();
         db.close();
 
-        TelegramAlert.send("TradingEngine STOPPED.");
+        TelegramAlert.send(restartRequested ? "TradingEngine restarting." : "TradingEngine STOPPED.");
         log.info("TradingEngine stopped.");
     }
 
@@ -1315,6 +1343,18 @@ public class TradingEngine {
         return "SELL".equalsIgnoreCase(side)
                 ? Math.min(fixedStop, trailingStop)
                 : Math.max(fixedStop, trailingStop);
+    }
+
+    static double optionBuyTrailPct(double optionPrice, double stopDistance, double configuredTrailPct) {
+        if (configuredTrailPct <= 0 || optionPrice <= 0 || stopDistance <= 0) return configuredTrailPct;
+        return Math.max(configuredTrailPct, stopDistance / optionPrice);
+    }
+
+    static double optionBuyEntryPrice(double optionLtp, double discountPct) {
+        double discount = Math.max(0, discountPct);
+        double entry = optionLtp - optionLtp * discount;
+        return MarketUtils.roundToTick(Math.max(0.05, entry),
+                com.trading.strategy.InstrumentType.OPTION_BUY);
     }
 
     private void startScheduledStrategyLoop() {

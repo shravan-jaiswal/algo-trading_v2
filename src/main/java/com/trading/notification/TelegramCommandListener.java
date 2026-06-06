@@ -18,7 +18,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Polls Telegram for incoming commands and routes them to the engine.
- * Supported: /status, /pnl, /positions, /halt, /resume, /closeall, /help
+ * Supported: /status, /pnl, /positions, /halt, /resume, /closeall, /restart, /help
  */
 public class TelegramCommandListener {
 
@@ -29,6 +29,7 @@ public class TelegramCommandListener {
     private final RiskManager  riskManager;
     private final OrderManager orderManager;
     private final Runnable     closeAllCallback;
+    private final Runnable     restartCallback;
     private final List<String> strategyNames;
     private final OkHttpClient http = new OkHttpClient();
 
@@ -41,12 +42,14 @@ public class TelegramCommandListener {
                                    RiskManager riskManager,
                                    OrderManager orderManager,
                                    Runnable closeAllCallback,
+                                   Runnable restartCallback,
                                    List<String> strategyNames) {
         this.botToken         = botToken;
         this.chatId           = chatId;
         this.riskManager      = riskManager;
         this.orderManager     = orderManager;
         this.closeAllCallback = closeAllCallback;
+        this.restartCallback  = restartCallback;
         this.strategyNames    = strategyNames;
     }
 
@@ -102,6 +105,13 @@ public class TelegramCommandListener {
                     yield "🔴 Closing all positions...";
                 }
                 yield "closeall not available.";
+            }
+            case "/restart"   -> {
+                if (restartCallback != null) {
+                    Thread.ofVirtual().start(restartCallback);
+                    yield "Restart requested. Service will come back up shortly.";
+                }
+                yield "restart not available.";
             }
             case "/strategy"  -> buildStrategy();
             case "/help"      -> buildHelp();
@@ -172,6 +182,7 @@ public class TelegramCommandListener {
                "/halt      — stop new trades\n" +
                "/resume    — resume trading\n" +
                "/closeall  — close all positions\n" +
+               "/restart   — restart the service\n" +
                "/help      — this message";
     }
 }

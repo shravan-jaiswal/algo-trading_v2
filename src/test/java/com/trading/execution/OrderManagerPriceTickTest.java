@@ -37,6 +37,14 @@ class OrderManagerPriceTickTest {
     }
 
     @Test
+    void brokerStopOnlyMovesInSaferDirection() {
+        assertEquals(true, OrderManager.shouldTightenStop("SELL", 90.00, 96.00));
+        assertEquals(false, OrderManager.shouldTightenStop("SELL", 96.00, 90.00));
+        assertEquals(true, OrderManager.shouldTightenStop("BUY", 110.00, 104.00));
+        assertEquals(false, OrderManager.shouldTightenStop("BUY", 104.00, 110.00));
+    }
+
+    @Test
     void deliveryPositionsAreNotRiskManagedOpenPositions() {
         OrderManager manager = new OrderManager(
                 null,

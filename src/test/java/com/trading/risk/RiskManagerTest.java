@@ -40,6 +40,18 @@ class RiskManagerTest {
         assertTrue(risk.isTSLHitShort("OPT|WRITE_PE", 91));
     }
 
+    @Test
+    void stepTrailingStopAdvancesByEntryStepAfterProfitStep() {
+        RiskManager risk = riskManager();
+
+        assertEquals(85.5, risk.initStepTSL("OPT|CE", 95, 0.10, 0.02, 0.01), 0.001);
+        assertEquals(85.5, risk.updateTSL("OPT|CE", 96.89), 0.001);
+        assertEquals(86.45, risk.updateTSL("OPT|CE", 96.90), 0.001);
+        assertEquals(87.40, risk.updateTSL("OPT|CE", 98.80), 0.001);
+        assertFalse(risk.isTSLHit("OPT|CE", 87.50));
+        assertTrue(risk.isTSLHit("OPT|CE", 87.40));
+    }
+
     private static RiskManager riskManager() {
         return new RiskManager(new RiskConfig(
                 1_000, 0.01, 0.20, 0.10,

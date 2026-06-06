@@ -269,7 +269,8 @@ order.margin.buffer.rs=1000
 order.broker.funds.check.enabled=true
 order.broker.flat.entry.cooldown.seconds=300
 order.protected.limit=true
-order.limit.wait.seconds=120
+order.limit.wait.seconds=300
+trading.option.buy.entry.discount.pct=0.01
 ```
 
 Entry, exit, and stop-loss orders use the same product type for the tracked position. If your Angel One account expects a different carry-forward product for F&O, set `order.product.type.delivery.derivatives` accordingly on the VPS.
@@ -455,6 +456,7 @@ Send these from **Telegram app** to your bot:
 | `/halt` | Stop new trades immediately |
 | `/resume` | Resume trading after halt |
 | `/closeall` | Emergency — close all open positions |
+| `/restart` | Restart the service without intentionally closing open positions |
 
 ---
 

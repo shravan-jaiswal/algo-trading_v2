@@ -200,6 +200,20 @@ public class RiskManager {
         return state.stop();
     }
 
+    public double initStepTSL(String token, double entryPrice, double initialStopPct,
+                              double triggerStepPct, double stopStepPct) {
+        if (entryPrice <= 0 || initialStopPct <= 0 || triggerStepPct <= 0 || stopStepPct <= 0) {
+            return 0;
+        }
+        TslState.LongStep state = TslState.initLongStep(entryPrice, initialStopPct,
+                triggerStepPct, stopStepPct);
+        tslState.put(token, new AtomicReference<>(state));
+        log.info("STEP TSL init | {} | entry:Rs.{} | initialStop:{}% | triggerStep:{}% | stopStep:{}% | stop:Rs.{}",
+                token, Shared.fmt(entryPrice), Shared.fmtPct(initialStopPct),
+                Shared.fmtPct(triggerStepPct), Shared.fmtPct(stopStepPct), Shared.fmt(state.stop()));
+        return state.stop();
+    }
+
     public double initTSLShort(String token, double entryPrice) {
         return initTSLShort(token, entryPrice, cfg.tslTrailPct());
     }
@@ -223,6 +237,7 @@ public class RiskManager {
         if (ref == null) return 0;
         TslState updated = ref.updateAndGet(s -> switch (s) {
             case TslState.Long  l  -> l.update(currentPrice, trailPct);
+            case TslState.LongStep st -> st.update(currentPrice);
             case TslState.Short sh -> {
                 log.warn("updateTSL called on SHORT position for token {}", token);
                 yield sh;
@@ -245,6 +260,10 @@ public class RiskManager {
                 log.warn("updateTSLShort called on LONG position for token {}", token);
                 yield l;
             }
+            case TslState.LongStep st -> {
+                log.warn("updateTSLShort called on STEP LONG position for token {}", token);
+                yield st;
+            }
         });
         return updated.stop();
     }
@@ -254,6 +273,7 @@ public class RiskManager {
         if (ref == null) return false;
         boolean hit = switch (ref.get()) {
             case TslState.Long  l  -> l.isHit(currentPrice);
+            case TslState.LongStep st -> st.isHit(currentPrice);
             case TslState.Short sh -> sh.isHit(currentPrice);
         };
         if (hit) log.info("TSL HIT | {} | price:Rs.{} | stop:Rs.{}",

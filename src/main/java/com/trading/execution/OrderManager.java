@@ -39,7 +39,9 @@ public class OrderManager {
 
     private record ClosePlan(boolean shouldPlaceOrder, int qty, boolean success) {}
     private record OpeningCapital(double amount, String source) {}
-    private record SlOrder(String orderId, String symbol, String token, String exchange, String variety) {}
+    private record SlOrder(String orderId, String symbol, String token, String exchange,
+                           String variety, String orderType, double triggerPrice,
+                           int quantity, String productType, String transactionType) {}
     private record FillResult(boolean filled, boolean shouldCancel) {}
     private record OrderSnapshot(String status, int filledQty, String message) {}
     public enum BrokerPositionSync {
@@ -66,6 +68,7 @@ public class OrderManager {
 
     private final Map<String, TrackedPosition> openPositions = new ConcurrentHashMap<>();
     private final Map<String, String> slOrderIds = new ConcurrentHashMap<>();
+    private final Map<String, Double> slOrderTriggers = new ConcurrentHashMap<>();
     private final Map<String, String> positionProductTypes = new ConcurrentHashMap<>();
     private final Map<String, Long> brokerFlatEntryBlockedUntil = new ConcurrentHashMap<>();
     private volatile JSONObject cachedBrokerPositions;
@@ -81,7 +84,7 @@ public class OrderManager {
         this.paperMode = paperMode;
         this.paperBroker = paperBroker;
         this.protectedLimitOrders = AppConfig.getBool("order.protected.limit", true);
-        this.limitWaitSeconds = AppConfig.getInt("order.limit.wait.seconds", 120);
+        this.limitWaitSeconds = AppConfig.getInt("order.limit.wait.seconds", 300);
         this.brokerFlatEntryCooldownSeconds = AppConfig.getInt("order.broker.flat.entry.cooldown.seconds", 300);
         this.marginCalculatorEnabled = AppConfig.getBool("order.margin.calculator.enabled", true);
         this.brokerFundsCheckEnabled = AppConfig.getBool("order.broker.funds.check.enabled", true);
@@ -103,6 +106,18 @@ public class OrderManager {
 
     public boolean buy(String symbol, String token, String exchange,
                        String positionKey, int qty, double price, String orderProductType) {
+        return buy(symbol, token, exchange, positionKey, qty, price, orderProductType, null);
+    }
+
+    public boolean buyLimit(String symbol, String token, String exchange,
+                            String positionKey, int qty, double entryPrice,
+                            double limitPrice, String orderProductType) {
+        return buy(symbol, token, exchange, positionKey, qty, entryPrice, orderProductType, limitPrice);
+    }
+
+    private boolean buy(String symbol, String token, String exchange,
+                        String positionKey, int qty, double price,
+                        String orderProductType, Double exactEntryLimitPrice) {
         if (openPositions.containsKey(positionKey)) {
             log.debug("BUY skipped - position already open | {} key={}", symbol, positionKey);
             return false;
@@ -123,7 +138,8 @@ public class OrderManager {
                 openPositions.put(positionKey, new TrackedPosition(price, qty, "BUY", symbol));
                 positionProductTypes.put(positionKey, normalizedProductType);
                 riskManager.onTradeOpened(positionKey, price, qty);
-                TelegramAlert.send("BUY: " + symbol + " x" + qty + " @ Rs." + fmt(price));
+                TelegramAlert.send("BUY " + strategyTag(positionKey) + ": "
+                        + symbol + " x" + qty + " @ Rs." + fmt(price));
             }
             return ok;
         }
@@ -144,8 +160,11 @@ public class OrderManager {
             }
             if (!hasBrokerFundsFor(symbol, openingCapital.amount())) return false;
 
-            String orderId = placeOrderWithSlippageProtection(symbol, token, exchange, qty, "BUY",
-                    price, false, normalizedProductType);
+            String orderId = exactEntryLimitPrice != null
+                    ? placeLimitOrder(symbol, token, exchange, qty, "BUY",
+                            exactEntryLimitPrice, normalizedProductType)
+                    : placeOrderWithSlippageProtection(symbol, token, exchange, qty, "BUY",
+                            price, false, normalizedProductType);
             if (orderId == null) return false;
 
             FillResult fillResult = waitForFill(orderId, limitWaitSeconds);
@@ -158,7 +177,8 @@ public class OrderManager {
             positionProductTypes.put(positionKey, normalizedProductType);
             riskManager.onTradeOpenedWithCapital(positionKey, openingCapital.amount(), openingCapital.source());
             invalidateBrokerPositionCache();
-            TelegramAlert.send("BUY FILLED: " + symbol + " x" + qty + " @ Rs." + fmt(price));
+            TelegramAlert.send("BUY FILLED " + strategyTag(positionKey) + ": "
+                    + symbol + " x" + qty + " @ Rs." + fmt(price));
             log.info("BUY filled | orderId:{} | {} x{} @ Rs.{} | product={}",
                     orderId, symbol, qty, fmt(price), normalizedProductType);
             return true;
@@ -195,7 +215,8 @@ public class OrderManager {
                 openPositions.put(positionKey, new TrackedPosition(price, qty, "SELL", symbol));
                 positionProductTypes.put(positionKey, normalizedProductType);
                 riskManager.onTradeOpened(positionKey, price, qty);
-                TelegramAlert.send("SHORT: " + symbol + " x" + qty + " @ Rs." + fmt(price));
+                TelegramAlert.send("SHORT " + strategyTag(positionKey) + ": "
+                        + symbol + " x" + qty + " @ Rs." + fmt(price));
             }
             return ok;
         }
@@ -230,7 +251,8 @@ public class OrderManager {
             positionProductTypes.put(positionKey, normalizedProductType);
             riskManager.onTradeOpenedWithCapital(positionKey, openingCapital.amount(), openingCapital.source());
             invalidateBrokerPositionCache();
-            TelegramAlert.send("SHORT FILLED: " + symbol + " x" + qty + " @ Rs." + fmt(price));
+            TelegramAlert.send("SHORT FILLED " + strategyTag(positionKey) + ": "
+                    + symbol + " x" + qty + " @ Rs." + fmt(price));
             log.info("SHORT filled | orderId:{} | {} x{} @ Rs.{} | product={}",
                     orderId, symbol, qty, fmt(price), normalizedProductType);
             return true;
@@ -256,8 +278,10 @@ public class OrderManager {
             if (ok) {
                 openPositions.remove(positionKey);
                 positionProductTypes.remove(positionKey);
+                slOrderTriggers.remove(positionKey);
                 riskManager.onTradeClosed(positionKey, pnl);
-                TelegramAlert.send(String.format("CLOSE: %s @ Rs.%.2f | P&L: %+.2f", symbol, price, pnl));
+                TelegramAlert.send(String.format("CLOSE %s: %s @ Rs.%.2f | P&L: %+.2f",
+                        strategyTag(positionKey), symbol, price, pnl));
             }
             return ok;
         }
@@ -289,9 +313,11 @@ public class OrderManager {
 
             openPositions.remove(positionKey);
             positionProductTypes.remove(positionKey);
+            slOrderTriggers.remove(positionKey);
             riskManager.onTradeClosed(positionKey, pnl);
             invalidateBrokerPositionCache();
-            TelegramAlert.send(String.format("CLOSED: %s @ Rs.%.2f | P&L: %+.2f", symbol, price, pnl));
+            TelegramAlert.send(String.format("CLOSED %s: %s @ Rs.%.2f | P&L: %+.2f",
+                    strategyTag(positionKey), symbol, price, pnl));
             log.info("Position closed | {} @ Rs.{} | P&L: Rs.{} | product={}",
                     symbol, fmt(price), fmt(pnl), orderProductType);
             return true;
@@ -317,9 +343,20 @@ public class OrderManager {
             if (existing != null && !existing.isEmpty()) {
                 SlOrder sl = existing.get(0);
                 slOrderIds.put(positionKey, sl.orderId());
-                log.info("SL already active | {} | trigger:Rs.{} | orderId:{}",
-                        symbol, fmt(triggerPrice), sl.orderId());
-                return true;
+                String slSide = "BUY".equals(pos.side()) ? "SELL" : "BUY";
+                double triggerTick = orderTickSize(symbol, exchange);
+                double roundedTrigger = roundedStopTrigger(triggerPrice, triggerTick, slSide);
+                double existingTrigger = sl.triggerPrice() > 0
+                        ? sl.triggerPrice()
+                        : slOrderTriggers.getOrDefault(positionKey, 0.0);
+                if (!shouldTightenStop(slSide, existingTrigger, roundedTrigger)) {
+                    if (existingTrigger > 0) slOrderTriggers.put(positionKey, existingTrigger);
+                    log.info("SL already active | {} | existingTrigger:Rs.{} requestedTrigger:Rs.{} | orderId:{}",
+                            symbol, fmt(existingTrigger), fmt(roundedTrigger), sl.orderId());
+                    return true;
+                }
+                return modifyStopLoss(sl, symbol, token, exchange, positionKey, pos,
+                        slSide, roundedTrigger, triggerTick);
             }
             if (existing == null) {
                 String trackedSlId = slOrderIds.get(positionKey);
@@ -334,9 +371,7 @@ public class OrderManager {
 
             String slSide = "BUY".equals(pos.side()) ? "SELL" : "BUY";
             double triggerTick = orderTickSize(symbol, exchange);
-            double roundedTrigger = "SELL".equalsIgnoreCase(slSide)
-                    ? roundDownToTick(triggerPrice, triggerTick)
-                    : roundUpToTick(triggerPrice, triggerTick);
+            double roundedTrigger = roundedStopTrigger(triggerPrice, triggerTick, slSide);
             OrderParams params = new OrderParams();
             params.variety = "STOPLOSS";
             params.tradingsymbol = symbol;
@@ -353,6 +388,7 @@ public class OrderManager {
             var resp = smartConnect.placeOrder(params, "STOPLOSS");
             if (resp != null && resp.orderId != null) {
                 slOrderIds.put(positionKey, resp.orderId);
+                slOrderTriggers.put(positionKey, roundedTrigger);
                 log.info("SL placed | {} | trigger:Rs.{} | tick:Rs.{} | orderId:{} | product={}",
                         symbol, fmt(roundedTrigger), fmt(triggerTick), resp.orderId, params.producttype);
                 return true;
@@ -444,6 +480,7 @@ public class OrderManager {
                 }
                 openPositions.remove(positionKey);
                 positionProductTypes.remove(positionKey);
+                slOrderTriggers.remove(positionKey);
                 riskManager.onTradeClosed(positionKey, 0);
                 recordBrokerFlatSync(symbol);
                 log.warn("Broker position manually flattened | {} key={} | local state synced",
@@ -514,6 +551,7 @@ public class OrderManager {
                 }
                 openPositions.remove(positionKey);
                 positionProductTypes.remove(positionKey);
+                slOrderTriggers.remove(positionKey);
                 riskManager.onTradeClosed(positionKey, 0);
                 recordBrokerFlatSync(symbol);
                 log.warn("CLOSE skipped - broker position already flat | {} key={} | local state synced",
@@ -939,6 +977,7 @@ public class OrderManager {
             try {
                 smartConnect.cancelOrder(slId, "STOPLOSS");
                 slOrderIds.remove(positionKey, slId);
+                slOrderTriggers.remove(positionKey);
                 invalidateBrokerOrderBookCache();
                 trackedSlCancelled = true;
                 log.info("Tracked SL cancelled | {} | orderId:{} | key={}",
@@ -1025,9 +1064,51 @@ public class OrderManager {
                     firstString(row, "tradingsymbol", "symbol", "symbolname"),
                     firstString(row, "symboltoken", "token"),
                     firstString(row, "exchange"),
-                    isBlank(variety) ? "STOPLOSS" : variety));
+                    isBlank(variety) ? "STOPLOSS" : variety,
+                    isBlank(orderType) ? "STOPLOSS_MARKET" : orderType,
+                    firstPositiveDouble(row, "triggerprice", "triggerPrice", "trigger_price"),
+                    Math.max(0, valueOrZero(firstInt(row, "quantity", "qty"))),
+                    brokerProductType(row),
+                    firstString(row, "transactiontype", "transactionType")));
         }
         return orders;
+    }
+
+    private boolean modifyStopLoss(SlOrder sl, String symbol, String token, String exchange,
+                                   String positionKey, TrackedPosition pos, String slSide,
+                                   double triggerPrice, double triggerTick) {
+        try {
+            OrderParams params = new OrderParams();
+            params.orderid = sl.orderId();
+            params.variety = isBlank(sl.variety()) ? "STOPLOSS" : sl.variety();
+            params.tradingsymbol = isBlank(sl.symbol()) ? symbol : sl.symbol();
+            params.symboltoken = isBlank(sl.token()) ? token : sl.token();
+            params.transactiontype = isBlank(sl.transactionType()) ? slSide : sl.transactionType();
+            params.exchange = isBlank(sl.exchange()) ? exchange : sl.exchange();
+            params.ordertype = isBlank(sl.orderType()) ? "STOPLOSS_MARKET" : sl.orderType();
+            params.producttype = isBlank(sl.productType())
+                    ? positionProductTypes.getOrDefault(positionKey, productType)
+                    : sl.productType();
+            params.duration = "DAY";
+            params.price = 0.0;
+            params.triggerprice = fmt(triggerPrice);
+            params.quantity = sl.quantity() > 0 ? sl.quantity() : pos.qty();
+
+            var resp = smartConnect.modifyOrder(sl.orderId(), params, params.variety);
+            if (resp != null && resp.orderId != null) {
+                slOrderTriggers.put(positionKey, triggerPrice);
+                invalidateBrokerOrderBookCache();
+                log.info("SL modified | {} | trigger:Rs.{} | tick:Rs.{} | orderId:{} | product={}",
+                        symbol, fmt(triggerPrice), fmt(triggerTick), sl.orderId(), params.producttype);
+                return true;
+            }
+            log.error("SL modify returned null order id | {} | orderId:{}", symbol, sl.orderId());
+            return false;
+        } catch (Exception e) {
+            log.error("SL modify failed | {} orderId:{} trigger:Rs.{} | {}",
+                    symbol, sl.orderId(), fmt(triggerPrice), e.getMessage());
+            return false;
+        }
     }
 
     private JSONObject getOrderBook() throws Exception {
@@ -1301,6 +1382,10 @@ public class OrderManager {
         return null;
     }
 
+    private static int valueOrZero(Integer value) {
+        return value == null ? 0 : value;
+    }
+
     private static double firstPositiveDouble(JSONObject row, String... keys) {
         for (String key : keys) {
             if (!row.has(key) || row.isNull(key)) continue;
@@ -1354,6 +1439,20 @@ public class OrderManager {
         return "BUY".equalsIgnoreCase(side) ? "SELL" : "BUY";
     }
 
+    static boolean shouldTightenStop(String stopSide, double existingTrigger, double requestedTrigger) {
+        if (requestedTrigger <= 0) return false;
+        if (existingTrigger <= 0) return true;
+        return "SELL".equalsIgnoreCase(stopSide)
+                ? requestedTrigger > existingTrigger
+                : requestedTrigger < existingTrigger;
+    }
+
+    private static double roundedStopTrigger(double triggerPrice, double triggerTick, String stopSide) {
+        return "SELL".equalsIgnoreCase(stopSide)
+                ? roundDownToTick(triggerPrice, triggerTick)
+                : roundUpToTick(triggerPrice, triggerTick);
+    }
+
     private String normalizeProductType(String value) {
         if (value == null || value.isBlank()) return productType;
         return value.trim().toUpperCase();
@@ -1379,6 +1478,13 @@ public class OrderManager {
 
     private static String fmt(double v) {
         return String.format("%.2f", v);
+    }
+
+    private static String strategyTag(String positionKey) {
+        if (isBlank(positionKey)) return "[UNKNOWN]";
+        String[] parts = positionKey.split("\\|");
+        if (parts.length < 2 || isBlank(parts[1])) return "[UNKNOWN]";
+        return "[" + parts[1].trim().toUpperCase() + "]";
     }
 
     private static String posKey(String token, String strategy) {
