@@ -1,5 +1,6 @@
 package com.trading.notification;
 
+import com.trading.data.ExecutedTradeRepository;
 import com.trading.execution.OrderManager;
 import com.trading.risk.RiskManager;
 import com.trading.utils.Shared;
@@ -28,12 +29,14 @@ public class TelegramCommandListener {
     private final String       chatId;
     private final RiskManager  riskManager;
     private final OrderManager orderManager;
+    private final ExecutedTradeRepository tradeRepo;
     private final Runnable     closeAllCallback;
     private final Runnable     restartCallback;
     private final List<String> strategyNames;
     private final OkHttpClient http = new OkHttpClient();
 
     private long lastUpdateId = 0;
+    private volatile boolean updateOffsetInitialized = false;
     private final ScheduledExecutorService scheduler =
             Executors.newSingleThreadScheduledExecutor(
                     Thread.ofVirtual().name("telegram-listener").factory());
@@ -41,6 +44,7 @@ public class TelegramCommandListener {
     public TelegramCommandListener(String botToken, String chatId,
                                    RiskManager riskManager,
                                    OrderManager orderManager,
+                                   ExecutedTradeRepository tradeRepo,
                                    Runnable closeAllCallback,
                                    Runnable restartCallback,
                                    List<String> strategyNames) {
@@ -48,12 +52,14 @@ public class TelegramCommandListener {
         this.chatId           = chatId;
         this.riskManager      = riskManager;
         this.orderManager     = orderManager;
+        this.tradeRepo        = tradeRepo;
         this.closeAllCallback = closeAllCallback;
         this.restartCallback  = restartCallback;
         this.strategyNames    = strategyNames;
     }
 
     public void start() {
+        initializeUpdateOffset();
         scheduler.scheduleAtFixedRate(this::poll, 5, 5, TimeUnit.SECONDS);
         log.info("TelegramCommandListener started.");
     }
@@ -64,6 +70,11 @@ public class TelegramCommandListener {
 
     private void poll() {
         try {
+            if (!updateOffsetInitialized) {
+                initializeUpdateOffset();
+                return;
+            }
+
             String url = "https://api.telegram.org/bot" + botToken +
                          "/getUpdates?offset=" + (lastUpdateId + 1) + "&timeout=2";
             Request req = new Request.Builder().url(url).build();
@@ -81,6 +92,35 @@ public class TelegramCommandListener {
             }
         } catch (IOException e) {
             log.warn("Telegram poll error: {}", e.getMessage());
+        }
+    }
+
+    private void initializeUpdateOffset() {
+        try {
+            String url = "https://api.telegram.org/bot" + botToken +
+                         "/getUpdates?offset=-1&timeout=0";
+            Request req = new Request.Builder().url(url).build();
+            try (Response resp = http.newCall(req).execute()) {
+                if (!resp.isSuccessful() || resp.body() == null) {
+                    log.warn("Telegram offset initialization failed: HTTP {}", resp.code());
+                    return;
+                }
+
+                JSONObject json = new JSONObject(resp.body().string());
+                JSONArray updates = json.optJSONArray("result");
+                if (updates != null) {
+                    for (int i = 0; i < updates.length(); i++) {
+                        lastUpdateId = Math.max(lastUpdateId,
+                                updates.getJSONObject(i).getLong("update_id"));
+                    }
+                }
+                updateOffsetInitialized = true;
+                if (lastUpdateId > 0) {
+                    log.info("TelegramCommandListener skipped pending updates through id {}", lastUpdateId);
+                }
+            }
+        } catch (IOException e) {
+            log.warn("Telegram offset initialization error: {}", e.getMessage());
         }
     }
 
@@ -140,15 +180,22 @@ public class TelegramCommandListener {
     }
 
     private String buildPnl() {
-        double net = riskManager.getDailyProfit() - riskManager.getDailyLoss();
+        ExecutedTradeRepository.PnlSummary db = tradeRepo != null
+                ? tradeRepo.todayPnlSummary()
+                : new ExecutedTradeRepository.PnlSummary(0, 0, 0, 0);
+        double runtimeNet = riskManager.getDailyProfit() - riskManager.getDailyLoss();
         return String.format(
             "💰 P&L Today\n" +
+            "Closed : %d trades\n" +
             "Profit : Rs.%s\n" +
             "Loss   : Rs.%s\n" +
-            "Net    : Rs.%s",
-            Shared.fmt(riskManager.getDailyProfit()),
-            Shared.fmt(riskManager.getDailyLoss()),
-            Shared.fmtPnl(net)
+            "Net    : Rs.%s\n" +
+            "Runtime: Rs.%s",
+            db.trades(),
+            Shared.fmt(db.grossProfit()),
+            Shared.fmt(db.grossLoss()),
+            Shared.fmtPnl(db.netPnl()),
+            Shared.fmtPnl(runtimeNet)
         );
     }
 

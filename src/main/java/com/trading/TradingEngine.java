@@ -218,7 +218,8 @@ public class TradingEngine {
         String chatId   = AppConfig.get("telegram.chat.id",   "");
         if (!botToken.isEmpty() && !chatId.isEmpty()) {
             telegramListener = new TelegramCommandListener(
-                    botToken, chatId, riskManager, orderManager, this::closeAllPositions,
+                    botToken, chatId, riskManager, orderManager, tradeRepo,
+                    this::closeAllPositions,
                     this::restartFromTelegram,
                     strategyMap.keySet().stream().sorted().toList());
             telegramListener.start();

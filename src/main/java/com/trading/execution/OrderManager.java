@@ -62,6 +62,7 @@ public class OrderManager {
     private final boolean brokerFundsCheckEnabled;
     private final double marginBuffer;
     private final long brokerOrderBookFailureCooldownMs;
+    private final long safetyAlertCooldownSeconds;
     private final String productType;
     private static final long BROKER_POSITION_CACHE_MS = 5000L;
     private static final long BROKER_ORDER_BOOK_CACHE_MS = 5000L;
@@ -91,6 +92,8 @@ public class OrderManager {
         this.marginBuffer = Math.max(0, AppConfig.getDouble("order.margin.buffer.rs", 1000));
         this.brokerOrderBookFailureCooldownMs = Math.max(5,
                 AppConfig.getInt("order.broker.orderbook.failure.cooldown.seconds", 60)) * 1000L;
+        this.safetyAlertCooldownSeconds = Math.max(30,
+                AppConfig.getInt("telegram.safety.alert.cooldown.seconds", 300));
         this.productType = AppConfig.get("order.product.type", "INTRADAY");
     }
 
@@ -296,6 +299,11 @@ public class OrderManager {
                 return false;
             }
 
+            closePlan = brokerVerifiedClosePlan(symbol, token, exchange, positionKey, pos);
+            if (!closePlan.shouldPlaceOrder()) {
+                return closePlan.success();
+            }
+
             String closeSide = "BUY".equals(pos.side()) ? "SELL" : "BUY";
             String orderId = placeOrderWithSlippageProtection(symbol, token, exchange,
                     closePlan.qty(), closeSide, price, true, orderProductType);
@@ -327,8 +335,8 @@ public class OrderManager {
         }
     }
 
-    public boolean placeStopLoss(String symbol, String token, String exchange,
-                                 String positionKey, double triggerPrice) {
+    public synchronized boolean placeStopLoss(String symbol, String token, String exchange,
+                                              String positionKey, double triggerPrice) {
         if (paperMode) return true;
         if (triggerPrice <= 0) return false;
 
@@ -339,13 +347,25 @@ public class OrderManager {
         }
 
         try {
+            String slSide = "BUY".equals(pos.side()) ? "SELL" : "BUY";
+            double triggerTick = orderTickSize(symbol, exchange);
+            double roundedTrigger = roundedStopTrigger(triggerPrice, triggerTick, slSide);
+            String trackedSlId = slOrderIds.get(positionKey);
+            double trackedTrigger = slOrderTriggers.getOrDefault(positionKey, 0.0);
+            if (!isBlank(trackedSlId) && trackedTrigger > 0
+                    && !shouldTightenStop(slSide, trackedTrigger, roundedTrigger)) {
+                log.info("SL already tracked | {} | existingTrigger:Rs.{} requestedTrigger:Rs.{} | orderId:{}",
+                        symbol, fmt(trackedTrigger), fmt(roundedTrigger), trackedSlId);
+                return true;
+            }
+            if (!isBlank(trackedSlId)) {
+                invalidateBrokerOrderBookCache();
+            }
+
             List<SlOrder> existing = findOpenStopLossOrders(symbol, token, exchange);
             if (existing != null && !existing.isEmpty()) {
                 SlOrder sl = existing.get(0);
                 slOrderIds.put(positionKey, sl.orderId());
-                String slSide = "BUY".equals(pos.side()) ? "SELL" : "BUY";
-                double triggerTick = orderTickSize(symbol, exchange);
-                double roundedTrigger = roundedStopTrigger(triggerPrice, triggerTick, slSide);
                 double existingTrigger = sl.triggerPrice() > 0
                         ? sl.triggerPrice()
                         : slOrderTriggers.getOrDefault(positionKey, 0.0);
@@ -358,20 +378,16 @@ public class OrderManager {
                 return modifyStopLoss(sl, symbol, token, exchange, positionKey, pos,
                         slSide, roundedTrigger, triggerTick);
             }
+            if (!isBlank(trackedSlId)) {
+                log.warn("Tracked SL not visible in order book - preserving existing protection | {} [{}] orderId:{}",
+                        symbol, token, trackedSlId);
+                return true;
+            }
             if (existing == null) {
-                String trackedSlId = slOrderIds.get(positionKey);
-                if (!isBlank(trackedSlId)) {
-                    log.warn("Could not verify tracked SL order - preserving existing protection | {} [{}] orderId:{}",
-                            symbol, token, trackedSlId);
-                    return true;
-                }
                 log.warn("Could not verify existing SL orders before initial/recovery placement | {} [{}]",
                         symbol, token);
             }
 
-            String slSide = "BUY".equals(pos.side()) ? "SELL" : "BUY";
-            double triggerTick = orderTickSize(symbol, exchange);
-            double roundedTrigger = roundedStopTrigger(triggerPrice, triggerTick, slSide);
             OrderParams params = new OrderParams();
             params.variety = "STOPLOSS";
             params.tradingsymbol = symbol;
@@ -472,6 +488,7 @@ public class OrderManager {
         if (local == null) return BrokerPositionSync.FLAT_SYNCED;
 
         try {
+            invalidateBrokerPositionCache();
             BrokerPosition brokerPosition = fetchBrokerPosition(symbol, token, exchange);
             if (brokerPosition == null || brokerPosition.isFlat()) {
                 if (!cancelPendingSlOrder(positionKey, symbol, token, exchange)) {
@@ -491,15 +508,17 @@ public class OrderManager {
             if (!brokerPosition.matchesOpeningSide(local.side())) {
                 log.error("Broker side mismatch during minute sync | {} key={} | localSide={} brokerNetQty={}",
                         symbol, positionKey, local.side(), brokerPosition.netQty());
-                TelegramAlert.sendAsync("CRITICAL: broker side mismatch for " + symbol
-                        + " netQty=" + brokerPosition.netQty());
+                sendSafetyAlert("broker-side-mismatch:" + positionKey,
+                        "CRITICAL: broker side mismatch for " + symbol
+                                + " netQty=" + brokerPosition.netQty());
                 return BrokerPositionSync.SIDE_MISMATCH;
             }
             if (brokerPosition.absQty() != local.qty()) {
                 log.warn("Broker qty differs during minute sync | {} key={} | localQty:{} brokerQty:{}",
                         symbol, positionKey, local.qty(), brokerPosition.absQty());
-                TelegramAlert.sendAsync("Broker quantity differs for " + symbol
-                        + " local=" + local.qty() + " broker=" + brokerPosition.absQty());
+                sendSafetyAlert("broker-qty-diff:" + positionKey,
+                        "Broker quantity differs for " + symbol
+                                + " local=" + local.qty() + " broker=" + brokerPosition.absQty());
             }
             return BrokerPositionSync.OPEN;
         } catch (Exception e) {
@@ -543,6 +562,7 @@ public class OrderManager {
     private ClosePlan brokerVerifiedClosePlan(String symbol, String token, String exchange,
                                               String positionKey, TrackedPosition local) {
         try {
+            invalidateBrokerPositionCache();
             BrokerPosition brokerPosition = fetchBrokerPosition(symbol, token, exchange);
             if (brokerPosition == null || brokerPosition.isFlat()) {
                 if (!cancelPendingSlOrder(positionKey, symbol, token, exchange)) {
@@ -563,8 +583,9 @@ public class OrderManager {
             if (!brokerPosition.matchesOpeningSide(local.side())) {
                 log.error("CLOSE blocked - broker side mismatch | {} key={} | localSide={} brokerNetQty={}",
                         symbol, positionKey, local.side(), brokerPosition.netQty());
-                TelegramAlert.sendAsync("Exit blocked: broker side mismatch for " + symbol
-                        + " netQty=" + brokerPosition.netQty());
+                sendSafetyAlert("exit-side-mismatch:" + positionKey,
+                        "Exit blocked: broker side mismatch for " + symbol
+                                + " netQty=" + brokerPosition.netQty());
                 return new ClosePlan(false, 0, false);
             }
 
@@ -580,6 +601,10 @@ public class OrderManager {
             TelegramAlert.sendAsync("Exit blocked: broker position check failed for " + symbol);
             return new ClosePlan(false, 0, false);
         }
+    }
+
+    private void sendSafetyAlert(String key, String message) {
+        TelegramAlert.sendAsyncThrottled(key, message, safetyAlertCooldownSeconds);
     }
 
     private OpeningCapital openingCapital(String symbol, String token, String exchange,

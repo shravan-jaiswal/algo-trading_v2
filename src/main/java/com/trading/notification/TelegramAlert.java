@@ -6,11 +6,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class TelegramAlert {
 
     private static final Logger log = LoggerFactory.getLogger(TelegramAlert.class);
     private static final OkHttpClient http = new OkHttpClient();
+    private static final Map<String, Long> throttledUntil = new ConcurrentHashMap<>();
 
     private static final boolean  ENABLED;
     private static final String   BOT_TOKEN;
@@ -53,6 +56,21 @@ public class TelegramAlert {
     public static void sendAsync(String message) {
         if (!ENABLED || BOT_TOKEN.isEmpty()) return;
         Thread.ofVirtual().start(() -> send(message));
+    }
+
+    public static void sendAsyncThrottled(String key, String message, long cooldownSeconds) {
+        if (!ENABLED || BOT_TOKEN.isEmpty()) return;
+        if (key == null || key.isBlank() || cooldownSeconds <= 0) {
+            sendAsync(message);
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        long nextAllowed = throttledUntil.getOrDefault(key, 0L);
+        if (now < nextAllowed) return;
+
+        throttledUntil.put(key, now + cooldownSeconds * 1000L);
+        sendAsync(message);
     }
 
     public static void sendAsyncTo(String chatId, String message) {

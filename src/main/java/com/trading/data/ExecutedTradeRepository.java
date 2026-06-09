@@ -19,6 +19,8 @@ public class ExecutedTradeRepository {
         ensureTable();
     }
 
+    public record PnlSummary(int trades, double grossProfit, double grossLoss, double netPnl) {}
+
     public void save(ExecutedTrade trade) {
         String sql = """
             INSERT INTO executed_trades
@@ -79,6 +81,33 @@ public class ExecutedTradeRepository {
             log.error("findOpen failed: {}", e.getMessage());
         }
         return result;
+    }
+
+    public PnlSummary todayPnlSummary() {
+        String sql = """
+            SELECT
+                COUNT(*) AS trades,
+                COALESCE(SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END), 0) AS gross_profit,
+                COALESCE(SUM(CASE WHEN pnl < 0 THEN ABS(pnl) ELSE 0 END), 0) AS gross_loss,
+                COALESCE(SUM(pnl), 0) AS net_pnl
+            FROM executed_trades
+            WHERE status='CLOSED'
+              AND exit_time::date = CURRENT_DATE
+            """;
+        try (Connection conn = db.getConnection();
+             Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery(sql)) {
+            if (rs.next()) {
+                return new PnlSummary(
+                        rs.getInt("trades"),
+                        rs.getDouble("gross_profit"),
+                        rs.getDouble("gross_loss"),
+                        rs.getDouble("net_pnl"));
+            }
+        } catch (SQLException e) {
+            log.error("todayPnlSummary failed: {}", e.getMessage());
+        }
+        return new PnlSummary(0, 0, 0, 0);
     }
 
     private ExecutedTrade mapRow(ResultSet rs) throws SQLException {
