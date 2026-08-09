@@ -20,6 +20,8 @@ public class ExecutedTradeRepository {
     }
 
     public record PnlSummary(int trades, double grossProfit, double grossLoss, double netPnl) {}
+    public record DailyRiskSummary(int entries, int closedTrades,
+                                   double grossProfit, double grossLoss) {}
 
     public void save(ExecutedTrade trade) {
         String sql = """
@@ -108,6 +110,44 @@ public class ExecutedTradeRepository {
             log.error("todayPnlSummary failed: {}", e.getMessage());
         }
         return new PnlSummary(0, 0, 0, 0);
+    }
+
+    public DailyRiskSummary todayRiskSummary() {
+        String sql = """
+            SELECT
+                COUNT(*) FILTER (
+                    WHERE entry_time::date = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date
+                ) AS entries,
+                COUNT(*) FILTER (
+                    WHERE status='CLOSED'
+                      AND exit_time::date = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date
+                ) AS closed_trades,
+                COALESCE(SUM(CASE
+                    WHEN status='CLOSED'
+                     AND exit_time::date = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date
+                     AND pnl > 0 THEN pnl ELSE 0 END), 0) AS gross_profit,
+                COALESCE(SUM(CASE
+                    WHEN status='CLOSED'
+                     AND exit_time::date = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date
+                     AND pnl < 0 THEN ABS(pnl) ELSE 0 END), 0) AS gross_loss
+            FROM executed_trades
+            WHERE entry_time::date = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date
+               OR exit_time::date = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date
+            """;
+        try (Connection conn = db.getConnection();
+             Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery(sql)) {
+            if (rs.next()) {
+                return new DailyRiskSummary(
+                        rs.getInt("entries"),
+                        rs.getInt("closed_trades"),
+                        rs.getDouble("gross_profit"),
+                        rs.getDouble("gross_loss"));
+            }
+        } catch (SQLException e) {
+            log.error("todayRiskSummary failed: {}", e.getMessage());
+        }
+        return new DailyRiskSummary(0, 0, 0, 0);
     }
 
     private ExecutedTrade mapRow(ResultSet rs) throws SQLException {

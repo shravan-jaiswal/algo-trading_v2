@@ -21,6 +21,61 @@ class RiskManagerTest {
     }
 
     @Test
+    void positionAllocationLimitAppliesToFixedLotOrders() {
+        RiskManager risk = new RiskManager(new RiskConfig(
+                500_000, 0.0055, 0.02, 0.046,
+                3.0, 0.01, 15, 3, 0.05));
+
+        assertTrue(risk.canOpenTradeForCapital(25_000, "option-premium"));
+        assertFalse(risk.canOpenTradeForCapital(25_001, "option-premium"));
+    }
+
+    @Test
+    void dailyStopsUseNetPnlAndIncludeEstimatedCosts() {
+        System.setProperty("risk.estimated.cost.per.closed.trade", "10");
+        try {
+            RiskManager profitRisk = new RiskManager(new RiskConfig(
+                    1_000, 0.01, 0.10, 0.20,
+                    3.0, 0.01, 10, 5, 1.0));
+            profitRisk.onTradeClosed("WIN1", 130); // net +120
+            profitRisk.onTradeClosed("LOSS", -40); // net -50
+            profitRisk.onTradeClosed("WIN2", 110); // net +100; cumulative net +170
+
+            assertEquals(170, profitRisk.getNetDailyPnl(), 0.001);
+            assertFalse(profitRisk.isHalted());
+
+            RiskManager lossRisk = new RiskManager(new RiskConfig(
+                    1_000, 0.01, 0.10, 0.20,
+                    3.0, 0.01, 10, 5, 1.0));
+            lossRisk.onTradeClosed("WIN", 60);   // net +50
+            lossRisk.onTradeClosed("LOSS", -110); // net -120; cumulative net -70
+
+            assertEquals(-70, lossRisk.getNetDailyPnl(), 0.001);
+            assertFalse(lossRisk.isHalted());
+        } finally {
+            System.clearProperty("risk.estimated.cost.per.closed.trade");
+        }
+    }
+
+    @Test
+    void restoresDailyLimitsAfterRestart() {
+        System.setProperty("risk.estimated.cost.per.closed.trade", "10");
+        try {
+            RiskManager risk = new RiskManager(new RiskConfig(
+                    1_000, 0.01, 0.20, 0.20,
+                    3.0, 0.01, 10, 5, 1.0));
+
+            risk.restoreDailyState(4, 3, 200, 50);
+
+            assertEquals(4, risk.getTradesToday());
+            assertEquals(120, risk.getNetDailyPnl(), 0.001);
+            assertFalse(risk.isHalted());
+        } finally {
+            System.clearProperty("risk.estimated.cost.per.closed.trade");
+        }
+    }
+
+    @Test
     void trailingStopAdvancesForBoughtOptionPremium() {
         RiskManager risk = riskManager();
 

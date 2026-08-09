@@ -1,5 +1,6 @@
 package com.trading.backtest;
 
+import com.trading.config.AppConfig;
 import com.trading.data.CandleRepository;
 import com.trading.data.DatabaseConfig;
 import com.trading.data.WatchlistRepository;
@@ -9,14 +10,20 @@ import com.trading.risk.RiskConfig;
 import com.trading.strategy.HoldingType;
 import com.trading.strategy.InstrumentConfig;
 import com.trading.strategy.MACrossoverStrategy;
+import com.trading.strategy.RSIStrategy;
 import com.trading.strategy.Strategy;
 import com.trading.strategy.TradeType;
 import com.trading.strategy.VwapSupertrendRsiStrategy;
 import com.trading.strategy.mics.MicsConfig;
 import com.trading.strategy.mics.MultiIndicatorConfluenceStrategy;
+import com.trading.strategy.scalping.MomentumScalpingConfig;
+import com.trading.strategy.scalping.MomentumScalpingStrategy;
+import com.trading.strategy.smc.SmcConfig;
+import com.trading.strategy.smc.SmcLiquiditySweepStrategy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 
@@ -54,10 +61,11 @@ public class BacktestRunner {
         }
 
         DatabaseConfig     db     = new DatabaseConfig();
-        CandleRepository   repo   = new CandleRepository(db);
+        CandleRepository   repo   = new CandleRepository(db, false);
 
-        LocalDateTime from = LocalDateTime.now().minusDays(days);
-        LocalDateTime to   = LocalDateTime.now();
+        TimeRange range = timeRange(days);
+        LocalDateTime from = range.from();
+        LocalDateTime to = range.to();
 
         List<Candle> candles = repo.findBetween(token, timeframe, from, to);
         log.info("Loaded {} candles for {} from {} to {}", candles.size(), token, from, to);
@@ -81,8 +89,8 @@ public class BacktestRunner {
 
     public static void runAll(String timeframe, String stratName, int days) {
         DatabaseConfig      db        = new DatabaseConfig();
-        CandleRepository    repo      = new CandleRepository(db);
-        WatchlistRepository wlRepo    = new WatchlistRepository(db);
+        CandleRepository    repo      = new CandleRepository(db, false);
+        WatchlistRepository wlRepo    = new WatchlistRepository(db, false);
         List<WatchlistItem> watchlist = wlRepo.findAll();
 
         if (watchlist.isEmpty()) {
@@ -92,8 +100,10 @@ public class BacktestRunner {
         }
 
         RiskConfig riskConfig = RiskConfig.fromAppConfig();
-        LocalDateTime from = LocalDateTime.now().minusDays(days);
-        LocalDateTime to   = LocalDateTime.now();
+        TimeRange range = timeRange(days);
+        LocalDateTime from = range.from();
+        LocalDateTime to = range.to();
+        boolean respectRouting = AppConfig.getBool("backtest.respect.watchlist.routing", true);
 
         // per-symbol accumulators for summary
         int    totalTrades   = 0;
@@ -109,7 +119,7 @@ public class BacktestRunner {
         int    ran           = 0;
 
         for (WatchlistItem item : watchlist) {
-            if (!item.hasStrategy(stratName)) {
+            if (respectRouting && !item.hasStrategy(stratName)) {
                 log.debug("Skipping {} — not configured for {}", item.symbol(), stratName);
                 continue;
             }
@@ -165,8 +175,21 @@ public class BacktestRunner {
         return switch (stratName.toUpperCase()) {
             case "MICS"  -> new MultiIndicatorConfluenceStrategy(MicsConfig.fromAppConfig(), InstrumentConfig.EQUITY);
             case "MA"    -> new MACrossoverStrategy();
+            case "RSI"   -> new RSIStrategy();
             case "VSRSI" -> new VwapSupertrendRsiStrategy();
+            case "SCALPING" -> new MomentumScalpingStrategy(
+                    MomentumScalpingConfig.fromAppConfig(), InstrumentConfig.EQUITY);
+            case "SMC" -> new SmcLiquiditySweepStrategy(
+                    SmcConfig.fromAppConfig(), InstrumentConfig.EQUITY);
             default      -> throw new IllegalArgumentException("Unknown strategy: " + stratName);
+        };
+    }
+
+    public static String defaultTimeframe(String stratName) {
+        String name = stratName == null ? "" : stratName.trim().toUpperCase();
+        return switch (name) {
+            case "SCALPING", "SMC" -> "ONE_MINUTE";
+            default -> "FIVE_MINUTE";
         };
     }
 
@@ -177,6 +200,26 @@ public class BacktestRunner {
         if ("MA".equals(name)) return "ma";
         if ("RSI".equals(name)) return "rsi";
         return name.toLowerCase().replaceAll("[^a-z0-9]+", ".");
+    }
+
+    private record TimeRange(LocalDateTime from, LocalDateTime to) {}
+
+    private static TimeRange timeRange(int days) {
+        String configuredFrom = AppConfig.get("backtest.from", "").trim();
+        String configuredTo = AppConfig.get("backtest.to", "").trim();
+        if (!configuredFrom.isEmpty() || !configuredTo.isEmpty()) {
+            if (configuredFrom.isEmpty() || configuredTo.isEmpty()) {
+                throw new IllegalArgumentException("Set both backtest.from and backtest.to (yyyy-MM-dd)");
+            }
+            LocalDate fromDate = LocalDate.parse(configuredFrom);
+            LocalDate toDate = LocalDate.parse(configuredTo);
+            if (toDate.isBefore(fromDate)) {
+                throw new IllegalArgumentException("backtest.to must be on or after backtest.from");
+            }
+            return new TimeRange(fromDate.atStartOfDay(),
+                    toDate.plusDays(1).atStartOfDay().minusNanos(1));
+        }
+        return new TimeRange(LocalDateTime.now().minusDays(days), LocalDateTime.now());
     }
 
     private static void logStrategyConfig(Strategy strategy, String label, List<Candle> candles) {

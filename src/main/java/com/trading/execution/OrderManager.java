@@ -43,7 +43,7 @@ public class OrderManager {
                            String variety, String orderType, double triggerPrice,
                            int quantity, String productType, String transactionType) {}
     private record FillResult(boolean filled, boolean shouldCancel) {}
-    private record OrderSnapshot(String status, int filledQty, String message) {}
+    private record OrderSnapshot(String status, int filledQty, double averagePrice, String message) {}
     public enum BrokerPositionSync {
         OPEN,
         FLAT_SYNCED,
@@ -70,6 +70,7 @@ public class OrderManager {
     private final Map<String, TrackedPosition> openPositions = new ConcurrentHashMap<>();
     private final Map<String, String> slOrderIds = new ConcurrentHashMap<>();
     private final Map<String, Double> slOrderTriggers = new ConcurrentHashMap<>();
+    private final Map<String, Double> lastExitPrices = new ConcurrentHashMap<>();
     private final Map<String, String> positionProductTypes = new ConcurrentHashMap<>();
     private final Map<String, Long> brokerFlatEntryBlockedUntil = new ConcurrentHashMap<>();
     private volatile JSONObject cachedBrokerPositions;
@@ -169,6 +170,9 @@ public class OrderManager {
                     : placeOrderWithSlippageProtection(symbol, token, exchange, qty, "BUY",
                             price, false, normalizedProductType);
             if (orderId == null) return false;
+            TelegramAlert.sendAsync("BUY ORDER PLACED " + strategyTag(positionKey) + ": "
+                    + symbol + " x" + qty + " @ entry Rs." + fmt(price)
+                    + " | waiting up to " + limitWaitSeconds + "s for fill");
 
             FillResult fillResult = waitForFill(orderId, limitWaitSeconds);
             if (!fillResult.filled()) {
@@ -176,14 +180,16 @@ public class OrderManager {
                         orderId, normalizedProductType, fillResult)) return false;
             }
 
-            openPositions.put(positionKey, new TrackedPosition(price, qty, "BUY", symbol));
+            OrderSnapshot fill = fetchOrderSnapshot(orderId);
+            double actualEntryPrice = fill.averagePrice() > 0 ? fill.averagePrice() : price;
+            openPositions.put(positionKey, new TrackedPosition(actualEntryPrice, qty, "BUY", symbol));
             positionProductTypes.put(positionKey, normalizedProductType);
             riskManager.onTradeOpenedWithCapital(positionKey, openingCapital.amount(), openingCapital.source());
             invalidateBrokerPositionCache();
             TelegramAlert.send("BUY FILLED " + strategyTag(positionKey) + ": "
-                    + symbol + " x" + qty + " @ Rs." + fmt(price));
+                    + symbol + " x" + qty + " @ Rs." + fmt(actualEntryPrice));
             log.info("BUY filled | orderId:{} | {} x{} @ Rs.{} | product={}",
-                    orderId, symbol, qty, fmt(price), normalizedProductType);
+                    orderId, symbol, qty, fmt(actualEntryPrice), normalizedProductType);
             return true;
         } catch (Exception e) {
             log.error("BUY failed | {}: {}", symbol, e.getMessage(), e);
@@ -243,6 +249,9 @@ public class OrderManager {
             String orderId = placeOrderWithSlippageProtection(symbol, token, exchange, qty, "SELL",
                     price, false, normalizedProductType);
             if (orderId == null) return false;
+            TelegramAlert.sendAsync("SHORT ORDER PLACED " + strategyTag(positionKey) + ": "
+                    + symbol + " x" + qty + " @ entry Rs." + fmt(price)
+                    + " | waiting up to " + limitWaitSeconds + "s for fill");
 
             FillResult fillResult = waitForFill(orderId, limitWaitSeconds);
             if (!fillResult.filled()) {
@@ -250,14 +259,16 @@ public class OrderManager {
                         orderId, normalizedProductType, fillResult)) return false;
             }
 
-            openPositions.put(positionKey, new TrackedPosition(price, qty, "SELL", symbol));
+            OrderSnapshot fill = fetchOrderSnapshot(orderId);
+            double actualEntryPrice = fill.averagePrice() > 0 ? fill.averagePrice() : price;
+            openPositions.put(positionKey, new TrackedPosition(actualEntryPrice, qty, "SELL", symbol));
             positionProductTypes.put(positionKey, normalizedProductType);
             riskManager.onTradeOpenedWithCapital(positionKey, openingCapital.amount(), openingCapital.source());
             invalidateBrokerPositionCache();
             TelegramAlert.send("SHORT FILLED " + strategyTag(positionKey) + ": "
-                    + symbol + " x" + qty + " @ Rs." + fmt(price));
+                    + symbol + " x" + qty + " @ Rs." + fmt(actualEntryPrice));
             log.info("SHORT filled | orderId:{} | {} x{} @ Rs.{} | product={}",
-                    orderId, symbol, qty, fmt(price), normalizedProductType);
+                    orderId, symbol, qty, fmt(actualEntryPrice), normalizedProductType);
             return true;
         } catch (Exception e) {
             log.error("SHORT failed | {}: {}", symbol, e.getMessage(), e);
@@ -273,15 +284,16 @@ public class OrderManager {
             return false;
         }
 
-        double pnl = calcPnl(pos, price);
         String orderProductType = positionProductTypes.getOrDefault(positionKey, productType);
 
         if (paperMode) {
+            double pnl = calcPnl(pos, price);
             boolean ok = paperBroker.closePosition(positionKey, price);
             if (ok) {
                 openPositions.remove(positionKey);
                 positionProductTypes.remove(positionKey);
                 slOrderTriggers.remove(positionKey);
+                lastExitPrices.put(positionKey, price);
                 riskManager.onTradeClosed(positionKey, pnl);
                 TelegramAlert.send(String.format("CLOSE %s: %s @ Rs.%.2f | P&L: %+.2f",
                         strategyTag(positionKey), symbol, price, pnl));
@@ -319,15 +331,19 @@ public class OrderManager {
                 return false;
             }
 
+            OrderSnapshot fill = fetchOrderSnapshot(orderId);
+            double actualExitPrice = fill.averagePrice() > 0 ? fill.averagePrice() : price;
+            double pnl = calcPnl(pos, actualExitPrice, closePlan.qty());
             openPositions.remove(positionKey);
             positionProductTypes.remove(positionKey);
             slOrderTriggers.remove(positionKey);
+            lastExitPrices.put(positionKey, actualExitPrice);
             riskManager.onTradeClosed(positionKey, pnl);
             invalidateBrokerPositionCache();
             TelegramAlert.send(String.format("CLOSED %s: %s @ Rs.%.2f | P&L: %+.2f",
-                    strategyTag(positionKey), symbol, price, pnl));
+                    strategyTag(positionKey), symbol, actualExitPrice, pnl));
             log.info("Position closed | {} @ Rs.{} | P&L: Rs.{} | product={}",
-                    symbol, fmt(price), fmt(pnl), orderProductType);
+                    symbol, fmt(actualExitPrice), fmt(pnl), orderProductType);
             return true;
         } catch (Exception e) {
             log.error("closePosition failed | {}: {}", symbol, e.getMessage(), e);
@@ -440,6 +456,11 @@ public class OrderManager {
         return p != null ? p.side() : null;
     }
 
+    public double consumeLastExitPrice(String positionKey, double fallbackPrice) {
+        Double price = lastExitPrices.remove(positionKey);
+        return price != null && price > 0 ? price : fallbackPrice;
+    }
+
     public Map<String, TrackedPosition> getOpenPositions() {
         return java.util.Collections.unmodifiableMap(openPositions);
     }
@@ -499,9 +520,13 @@ public class OrderManager {
                 positionProductTypes.remove(positionKey);
                 slOrderTriggers.remove(positionKey);
                 riskManager.onTradeClosed(positionKey, 0);
+                riskManager.haltTrading();
                 recordBrokerFlatSync(symbol);
                 log.warn("Broker position manually flattened | {} key={} | local state synced",
                         symbol, positionKey);
+                sendSafetyAlert("broker-flat-pnl-unknown:" + positionKey,
+                        "Trading halted: broker-flat exit P&L is unknown for " + symbol
+                                + ". Reconcile the broker fill before resuming.");
                 TelegramAlert.sendAsync("Broker position manually flattened - local state synced: " + symbol);
                 return BrokerPositionSync.FLAT_SYNCED;
             }
@@ -573,10 +598,14 @@ public class OrderManager {
                 positionProductTypes.remove(positionKey);
                 slOrderTriggers.remove(positionKey);
                 riskManager.onTradeClosed(positionKey, 0);
+                riskManager.haltTrading();
                 recordBrokerFlatSync(symbol);
                 log.warn("CLOSE skipped - broker position already flat | {} key={} | local state synced",
                         symbol, positionKey);
                 TelegramAlert.sendAsync("Broker position already flat - skipped exit order: " + symbol);
+                sendSafetyAlert("broker-flat-pnl-unknown:" + positionKey,
+                        "Trading halted: broker-flat exit P&L is unknown for " + symbol
+                                + ". Reconcile the broker fill before resuming.");
                 return new ClosePlan(false, 0, true);
             }
 
@@ -959,6 +988,10 @@ public class OrderManager {
         if (filledQty > 0) {
             flattenPartialEntry(symbol, token, exchange, openingSide,
                     filledQty, orderId, orderProductType);
+        } else {
+            TelegramAlert.sendAsync(openingSide + " NOT FILLED: " + symbol
+                    + " x" + qty + " | status=" + afterCancel.status()
+                    + " | no open position created");
         }
         return false;
     }
@@ -968,7 +1001,8 @@ public class OrderManager {
             JSONObject resp = smartConnect.getIndividualOrderDetails(orderId);
             JSONObject data = resp == null ? null : resp.optJSONObject("data");
             if (data == null) {
-                return new OrderSnapshot("", 0, resp == null ? "" : resp.optString("message", ""));
+                return new OrderSnapshot("", 0, -1,
+                        resp == null ? "" : resp.optString("message", ""));
             }
             String status = firstString(data, "status", "orderstatus", "orderStatus").toLowerCase();
             Integer filledQty = firstInt(data,
@@ -979,10 +1013,14 @@ public class OrderManager {
             String message = firstString(data,
                     "text", "message", "rejreason", "rejectreason", "rejectionreason",
                     "statusMessage", "orderstatus");
-            return new OrderSnapshot(status, filledQty == null ? 0 : Math.max(0, filledQty), message);
+            double averagePrice = firstPositiveDouble(data,
+                    "averageprice", "averagePrice", "average_price",
+                    "avgprice", "avgPrice", "avg_price");
+            return new OrderSnapshot(status, filledQty == null ? 0 : Math.max(0, filledQty),
+                    averagePrice, message);
         } catch (Throwable e) {
             log.warn("Order status check failed | orderId:{} | {}", orderId, e.getMessage());
-            return new OrderSnapshot("", 0, "");
+            return new OrderSnapshot("", 0, -1, "");
         }
     }
 
@@ -1496,9 +1534,13 @@ public class OrderManager {
     }
 
     private static double calcPnl(TrackedPosition pos, double exitPrice) {
+        return calcPnl(pos, exitPrice, pos.qty());
+    }
+
+    private static double calcPnl(TrackedPosition pos, double exitPrice, int qty) {
         return "BUY".equals(pos.side())
-                ? (exitPrice - pos.entryPrice()) * pos.qty()
-                : (pos.entryPrice() - exitPrice) * pos.qty();
+                ? (exitPrice - pos.entryPrice()) * qty
+                : (pos.entryPrice() - exitPrice) * qty;
     }
 
     private static String fmt(double v) {

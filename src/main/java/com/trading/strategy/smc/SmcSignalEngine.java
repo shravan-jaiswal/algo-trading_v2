@@ -48,12 +48,12 @@ public final class SmcSignalEngine {
         boolean bearFvg = hasRecentBearishFvg(candles, atr, cfg.minFvgAtrPct(), cfg.sweepRecentBars());
 
         if (bull != null && bullishStructureShift(candles, bull.index(), cfg.swingLookback())
-                && close > vwap && bias5m != Bias.BEAR && (bullFvg || close > vwap)) {
+                && close > vwap && bias5m != Bias.BEAR && bullFvg) {
             return new Result(Signal.LONG, Math.min(bull.level(), close - atr * cfg.atrStopMultiplier()),
                     "bullish_sweep_mss_vwap");
         }
         if (bear != null && bearishStructureShift(candles, bear.index(), cfg.swingLookback())
-                && close < vwap && bias5m != Bias.BULL && (bearFvg || close < vwap)) {
+                && close < vwap && bias5m != Bias.BULL && bearFvg) {
             return new Result(Signal.SHORT, Math.max(bear.level(), close + atr * cfg.atrStopMultiplier()),
                     "bearish_sweep_mss_vwap");
         }

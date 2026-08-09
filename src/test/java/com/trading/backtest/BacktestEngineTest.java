@@ -93,6 +93,45 @@ class BacktestEngineTest {
         assertEquals("TSL", result.trades().get(0).exitReason());
     }
 
+    @Test
+    void ignoresWeekendCandles() {
+        Strategy strategy = new AlwaysLongStrategy();
+        BacktestEngine engine = new BacktestEngine(strategy, RiskConfig.paperDefaults(), false);
+
+        BacktestEngine.BacktestResult result = engine.run(List.of(
+                candle("2026-05-16T09:30", 100),
+                candle("2026-05-16T09:35", 101),
+                candle("2026-05-16T09:40", 102)
+        ));
+
+        assertEquals(0, result.totalTrades());
+    }
+
+    @Test
+    void subtractsConfiguredRoundTripCost() {
+        try {
+            Strategy strategy = new LongThenExitStrategy();
+            List<Candle> candles = List.of(
+                    candle("09:30", 100),
+                    candle("09:35", 101),
+                    candle("09:40", 102)
+            );
+
+            System.setProperty("backtest.fixed.cost.per.trade", "0");
+            BacktestEngine grossEngine = new BacktestEngine(strategy, RiskConfig.paperDefaults(), false);
+            BacktestEngine.BacktestResult gross = grossEngine.run(candles);
+
+            System.setProperty("backtest.fixed.cost.per.trade", "50");
+            BacktestEngine netEngine = new BacktestEngine(strategy, RiskConfig.paperDefaults(), false);
+            BacktestEngine.BacktestResult net = netEngine.run(candles);
+
+            assertEquals(1, net.totalTrades());
+            assertEquals(gross.totalPnl() - 50, net.totalPnl(), 0.001);
+        } finally {
+            System.clearProperty("backtest.fixed.cost.per.trade");
+        }
+    }
+
     private static Candle candle(String time, double close) {
         String timestamp = time.contains("T") ? time : "2026-05-19T" + time;
         return new Candle("T", "FIVE_MINUTE", LocalDateTime.parse(timestamp),

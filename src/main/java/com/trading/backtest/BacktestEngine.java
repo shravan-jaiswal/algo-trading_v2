@@ -8,6 +8,7 @@ import com.trading.strategy.HoldingType;
 import com.trading.strategy.Strategy;
 import com.trading.strategy.Strategy.Signal;
 import com.trading.strategy.TradeType;
+import com.trading.utils.MarketUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -86,6 +87,8 @@ public class BacktestEngine {
     private final HoldingType holdingType;
     private final TradeType   tradeType;
     private final LocalTime   squareOffTime;
+    private final double      fixedCostPerTrade;
+    private final double      roundTripCostBps;
 
     public BacktestEngine(Strategy strategy, RiskConfig riskConfig) {
         this(strategy, riskConfig, HoldingType.fromConfig(strategy));
@@ -102,9 +105,16 @@ public class BacktestEngine {
         this.intradayOnly = this.holdingType.isIntraday();
         this.tradeType    = TradeType.fromConfig(strategy);
         this.squareOffTime = LocalTime.parse(AppConfig.get("market.squareoff", "15:15"));
+        this.fixedCostPerTrade = Math.max(0,
+                AppConfig.getDouble("backtest.fixed.cost.per.trade", 0));
+        this.roundTripCostBps = Math.max(0,
+                AppConfig.getDouble("backtest.round.trip.cost.bps", 0));
     }
 
     public BacktestResult run(List<Candle> candles) {
+        candles = candles == null ? List.of() : candles.stream()
+                .filter(c -> MarketUtils.isRegularMarketSession(c.getTs()))
+                .toList();
         List<Trade> trades    = new ArrayList<>();
         int minBars           = strategy.getMinCandles();
 
@@ -114,9 +124,9 @@ public class BacktestEngine {
         double stopLoss                      = 0;
         double takeProfit                    = 0;
         java.time.LocalDateTime entryTime    = null;
-        double peakEquity     = 0;
-        double maxDrawdown    = 0;
         double equity         = riskManager.getConfig().capital();
+        double peakEquity     = equity;
+        double maxDrawdown    = 0;
 
         for (int i = minBars; i < candles.size(); i++) {
             List<Candle> window = candles.subList(0, i + 1);
@@ -130,9 +140,7 @@ public class BacktestEngine {
                 boolean lastBarOfDay = (i == candles.size() - 1)
                         || !candles.get(i + 1).getTs().toLocalDate().equals(barDay);
                 if (openSide != Signal.NONE && (squareOffBar || lastBarOfDay)) {
-                    double pnl = openSide == Signal.LONG
-                            ? (close - entryPrice) * qty
-                            : (entryPrice - close) * qty;
+                    double pnl = netPnl(openSide, entryPrice, close, qty);
                     trades.add(new Trade(entryTime, bar.getTs(), entryPrice, close, qty, pnl,
                             openSide.name(), squareOffBar ? "INTRADAY_EXIT" : "EOD_FALLBACK"));
                     equity   += pnl;
@@ -188,9 +196,7 @@ public class BacktestEngine {
                 }
 
                 if (exitNow) {
-                    double pnl = openSide == Signal.LONG
-                            ? (close - entryPrice) * qty
-                            : (entryPrice - close) * qty;
+                    double pnl = netPnl(openSide, entryPrice, close, qty);
                     trades.add(new Trade(entryTime, bar.getTs(), entryPrice, close, qty, pnl,
                             openSide.name(), exitReason));
                     equity    += pnl;
@@ -236,9 +242,7 @@ public class BacktestEngine {
         if (openSide != Signal.NONE && !candles.isEmpty()) {
             Candle lastBar   = candles.get(candles.size() - 1);
             double lastClose = lastBar.getClose();
-            double pnl = openSide == Signal.LONG
-                    ? (lastClose - entryPrice) * qty
-                    : (entryPrice - lastClose) * qty;
+            double pnl = netPnl(openSide, entryPrice, lastClose, qty);
             trades.add(new Trade(entryTime, lastBar.getTs(), entryPrice, lastClose, qty, pnl,
                     openSide.name(), "FINAL_BAR"));
             riskManager.clearTSL(positionKey(openSide));
@@ -275,5 +279,13 @@ public class BacktestEngine {
 
     private String positionKey(Signal side) {
         return BACKTEST_POSITION_KEY + "|" + strategy.getName() + "|" + side.name();
+    }
+
+    private double netPnl(Signal side, double entry, double exit, int qty) {
+        double gross = side == Signal.LONG
+                ? (exit - entry) * qty
+                : (entry - exit) * qty;
+        double turnoverCost = (entry + exit) * qty * roundTripCostBps / 10_000.0;
+        return gross - fixedCostPerTrade - turnoverCost;
     }
 }

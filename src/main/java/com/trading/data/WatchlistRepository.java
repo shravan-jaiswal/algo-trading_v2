@@ -15,8 +15,15 @@ public class WatchlistRepository {
     private final DatabaseConfig db;
 
     public WatchlistRepository(DatabaseConfig db) {
+        this(db, true);
+    }
+
+    /**
+     * @param ensureSchema false for read-only diagnostics/backtests against an existing database
+     */
+    public WatchlistRepository(DatabaseConfig db, boolean ensureSchema) {
         this.db = db;
-        ensureTable();
+        if (ensureSchema) ensureTable();
     }
 
     public List<WatchlistItem> findAll() {

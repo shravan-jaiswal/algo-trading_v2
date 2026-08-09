@@ -53,26 +53,30 @@ public class Application {
         }
 
         if (app.backtestDays > 0) {
+            String timeframe = com.trading.backtest.BacktestRunner
+                    .defaultTimeframe(app.backtestStrategy);
             log.info("Starting backtest | strategy={} days={} token={}",
                      app.backtestStrategy, app.backtestDays,
                      app.backtestToken != null ? app.backtestToken : "ALL");
             if (app.backtestToken != null) {
                 com.trading.backtest.BacktestRunner.main(
-                        new String[]{app.backtestToken, "FIVE_MINUTE", app.backtestStrategy,
+                        new String[]{app.backtestToken, timeframe, app.backtestStrategy,
                                      String.valueOf(app.backtestDays)});
             } else {
                 com.trading.backtest.BacktestRunner.runAll(
-                        "FIVE_MINUTE", app.backtestStrategy, app.backtestDays);
+                        timeframe, app.backtestStrategy, app.backtestDays);
             }
             return;
         }
 
         if (app.replayToday) {
+            String timeframe = com.trading.backtest.BacktestRunner
+                    .defaultTimeframe(app.backtestStrategy);
             log.info("Starting today replay | strategy={} token={}",
                     app.backtestStrategy,
                     app.backtestToken != null ? app.backtestToken : "ALL");
             com.trading.diagnostics.TodayReplayRunner.run(
-                    "FIVE_MINUTE", app.backtestStrategy, app.backtestToken);
+                    timeframe, app.backtestStrategy, app.backtestToken);
             return;
         }
 

@@ -26,6 +26,7 @@ public class VwapSupertrendRsiStrategy implements Strategy {
     private final LocalTime entryCutoff;
     private final InstrumentConfig instrumentConfig;
     private final SupertrendMode supertrendMode;
+    private final boolean requireFreshSignal;
     private volatile String lastReason = "init";
 
     public record Diagnostics(
@@ -91,6 +92,7 @@ public class VwapSupertrendRsiStrategy implements Strategy {
         this.entryCutoff     = entryCutoff;
         this.instrumentConfig = instrumentConfig;
         this.supertrendMode  = supertrendMode == null ? SupertrendMode.LEGACY : supertrendMode;
+        this.requireFreshSignal = AppConfig.getBool("strategy.vsrsi.require.fresh.signal", true);
     }
 
     public VwapSupertrendRsiStrategy() {
@@ -138,12 +140,12 @@ public class VwapSupertrendRsiStrategy implements Strategy {
         GateState gate = gateState(candles, close, vwap, cache);
         if (gate == null) return Signal.NONE;
 
-        if (gate.longSignal()) {
+        if (gate.longSignal() && isFreshSignal(candles, true)) {
             lastReason = "signal_long";
             log.debug("VSRSI LONG | close:{} vwap:{} rsi:{}", close, vwap, gate.rsi());
             return Signal.LONG;
         }
-        if (gate.shortSignal()) {
+        if (gate.shortSignal() && isFreshSignal(candles, false)) {
             lastReason = "signal_short";
             log.debug("VSRSI SHORT | close:{} vwap:{} rsi:{}", close, vwap, gate.rsi());
             return Signal.SHORT;
@@ -235,6 +237,21 @@ public class VwapSupertrendRsiStrategy implements Strategy {
         boolean bullRsi = rsi > rsiBullLow && rsi < rsiBullHigh;
         boolean bearRsi = rsi > rsiBearLow && rsi < rsiBearHigh;
         return new GateState(aboveVwap, stBull, bullRsi, bearRsi, rsi);
+    }
+
+    private boolean isFreshSignal(List<Candle> candles, boolean longSide) {
+        if (!requireFreshSignal || candles.size() < getMinCandles() + 1) return true;
+        Candle latest = candles.get(candles.size() - 1);
+        Candle previous = candles.get(candles.size() - 2);
+        if (!latest.getTs().toLocalDate().equals(previous.getTs().toLocalDate())) return true;
+
+        List<Candle> priorWindow = candles.subList(0, candles.size() - 1);
+        double priorVwap = VwapIndicator.current(priorWindow);
+        if (priorVwap <= 0) return true;
+        GateState prior = gateState(priorWindow, previous.getClose(), priorVwap,
+                BarSeriesCache.of(priorWindow));
+        if (prior == null) return true;
+        return longSide ? !prior.longSignal() : !prior.shortSignal();
     }
 
     private SupertrendIndicator.Result calculateSupertrend(List<Candle> candles) {

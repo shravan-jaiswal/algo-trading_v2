@@ -16,8 +16,15 @@ public class CandleRepository {
     private final DatabaseConfig db;
 
     public CandleRepository(DatabaseConfig db) {
+        this(db, true);
+    }
+
+    /**
+     * @param ensureSchema false for read-only diagnostics/backtests against an existing database
+     */
+    public CandleRepository(DatabaseConfig db, boolean ensureSchema) {
         this.db = db;
-        ensureTable();
+        if (ensureSchema) ensureTable();
     }
 
     public void upsert(Candle c) {

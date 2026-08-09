@@ -1,5 +1,6 @@
 package com.trading.risk;
 
+import com.trading.config.AppConfig;
 import com.trading.strategy.Strategy.Signal;
 import com.trading.utils.Shared;
 import org.slf4j.Logger;
@@ -15,6 +16,7 @@ public class RiskManager {
     private static final Logger log = LoggerFactory.getLogger(RiskManager.class);
 
     private final RiskConfig cfg;
+    private final double estimatedCostPerClosedTrade;
 
     // ── Runtime state (lock-free) ─────────────────────────────────────
     private final AtomicReference<Double>  dailyLoss       = new AtomicReference<>(0.0);
@@ -33,6 +35,8 @@ public class RiskManager {
 
     public RiskManager(RiskConfig cfg) {
         this.cfg = cfg;
+        this.estimatedCostPerClosedTrade = Math.max(0,
+                AppConfig.getDouble("risk.estimated.cost.per.closed.trade", 0));
     }
 
     public void logInit() {
@@ -68,6 +72,13 @@ public class RiskManager {
                     Shared.fmt(requiredCapital), source);
             return false;
         }
+        double allocationLimit = cfg.capital() * cfg.maxPositionSize();
+        if (requiredCapital > allocationLimit) {
+            log.warn("Trade blocked by position allocation | required:Rs.{} source:{} limit:Rs.{} ({})",
+                    Shared.fmt(requiredCapital), source, Shared.fmt(allocationLimit),
+                    Shared.fmtPct(cfg.maxPositionSize()));
+            return false;
+        }
         double available = getAvailableCapital();
         if (requiredCapital > available) {
             log.warn("Trade blocked by capital | required:Rs.{} source:{} available:Rs.{} deployed:Rs.{} total:Rs.{}",
@@ -90,14 +101,14 @@ public class RiskManager {
         }
         if (isDailyLossBreached()) {
             haltTrading.set(true);
-            log.warn("Daily loss limit breached | loss:Rs.{} / limit:Rs.{}",
-                    Shared.fmt(dailyLoss.get()), Shared.fmt(cfg.capital() * cfg.maxDailyLoss()));
+            log.warn("Daily net loss limit breached | netPnl:Rs.{} / limit:-Rs.{}",
+                    Shared.fmtPnl(getNetDailyPnl()), Shared.fmt(cfg.capital() * cfg.maxDailyLoss()));
             return false;
         }
         if (isDailyProfitReached()) {
             haltTrading.set(true);
-            log.info("Daily profit target reached | profit:Rs.{} / target:Rs.{}",
-                    Shared.fmt(dailyProfit.get()), Shared.fmt(cfg.capital() * cfg.maxDailyProfit()));
+            log.info("Daily net profit target reached | netPnl:Rs.{} / target:Rs.{}",
+                    Shared.fmtPnl(getNetDailyPnl()), Shared.fmt(cfg.capital() * cfg.maxDailyProfit()));
             return false;
         }
         if (tradesToday.get() >= cfg.maxTradesPerDay()) {
@@ -332,22 +343,42 @@ public class RiskManager {
         }
     }
 
+    public void restoreDailyState(int trades, int closedTrades,
+                                  double grossProfit, double grossLoss) {
+        tradesToday.set(Math.max(0, trades));
+        dailyProfit.set(Math.max(0, grossProfit));
+        dailyLoss.set(Math.max(0, grossLoss)
+                + Math.max(0, closedTrades) * estimatedCostPerClosedTrade);
+        boolean limitReached = tradesToday.get() >= cfg.maxTradesPerDay()
+                || isDailyLossBreached() || isDailyProfitReached();
+        haltTrading.set(limitReached);
+        log.info("Daily risk restored | trades:{} closed:{} grossProfit:Rs.{} grossLoss:Rs.{} "
+                        + "estimatedCosts:Rs.{} netPnl:Rs.{} halted:{}",
+                tradesToday.get(), Math.max(0, closedTrades), Shared.fmt(dailyProfit.get()),
+                Shared.fmt(Math.max(0, grossLoss)),
+                Shared.fmt(Math.max(0, closedTrades) * estimatedCostPerClosedTrade),
+                Shared.fmtPnl(getNetDailyPnl()), haltTrading.get());
+    }
+
     public void onTradeClosed(String token, double pnl) {
         openPositions.updateAndGet(v -> Math.max(0, v - 1));
         Double deployedValue = symbolDeployed.remove(token);
         double deployed = deployedValue == null ? 0 : deployedValue;
         if (deployed > 0) deployedCapital.updateAndGet(v -> Math.max(0, v - deployed));
-        symbolPnL.merge(token, pnl, Double::sum);
+        double netPnl = pnl - estimatedCostPerClosedTrade;
+        symbolPnL.merge(token, netPnl, Double::sum);
         clearTSL(token);
 
-        if (pnl < 0) {
-            dailyLoss.updateAndGet(v -> v + Math.abs(pnl));
-            log.info("Trade LOSS   | {} | pnl:Rs.{} | totalLoss:Rs.{}",
-                    token, Shared.fmtPnl(pnl), Shared.fmt(dailyLoss.get()));
+        if (netPnl < 0) {
+            dailyLoss.updateAndGet(v -> v + Math.abs(netPnl));
+            log.info("Trade LOSS   | {} | grossPnl:Rs.{} estimatedCost:Rs.{} netPnl:Rs.{} | totalLoss:Rs.{}",
+                    token, Shared.fmtPnl(pnl), Shared.fmt(estimatedCostPerClosedTrade),
+                    Shared.fmtPnl(netPnl), Shared.fmt(dailyLoss.get()));
         } else {
-            dailyProfit.updateAndGet(v -> v + pnl);
-            log.info("Trade PROFIT | {} | pnl:Rs.{} | totalProfit:Rs.{}",
-                    token, Shared.fmtPnl(pnl), Shared.fmt(dailyProfit.get()));
+            dailyProfit.updateAndGet(v -> v + netPnl);
+            log.info("Trade PROFIT | {} | grossPnl:Rs.{} estimatedCost:Rs.{} netPnl:Rs.{} | totalProfit:Rs.{}",
+                    token, Shared.fmtPnl(pnl), Shared.fmt(estimatedCostPerClosedTrade),
+                    Shared.fmtPnl(netPnl), Shared.fmt(dailyProfit.get()));
         }
 
         if (isDailyLossBreached())   haltTrading.set(true);
@@ -401,6 +432,7 @@ public class RiskManager {
     public double  getAvailableCapital()  { return Math.max(0, cfg.capital() - deployedCapital.get()); }
     public double  getDailyLoss()         { return dailyLoss.get(); }
     public double  getDailyProfit()       { return dailyProfit.get(); }
+    public double  getNetDailyPnl()       { return dailyProfit.get() - dailyLoss.get(); }
     public int     getTradesToday()       { return tradesToday.get(); }
     public int     getOpenPositions()     { return openPositions.get(); }
     public boolean isHalted()             { return haltTrading.get(); }
@@ -414,12 +446,12 @@ public class RiskManager {
     // PRIVATE
     // ─────────────────────────────────────────────────────────────────
     private boolean isDailyLossBreached() {
-        return dailyLoss.get() >= cfg.capital() * cfg.maxDailyLoss();
+        return getNetDailyPnl() <= -(cfg.capital() * cfg.maxDailyLoss());
     }
 
     private boolean isDailyProfitReached() {
         return cfg.maxDailyProfit() > 0
-                && dailyProfit.get() >= cfg.capital() * cfg.maxDailyProfit();
+                && getNetDailyPnl() >= cfg.capital() * cfg.maxDailyProfit();
     }
 
 }
